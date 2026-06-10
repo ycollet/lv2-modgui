@@ -34,13 +34,15 @@ typedef struct {
 
 /* Data exchanged between work() and work_response() */
 typedef struct {
-    LilvInstance* instance;
-    ControlPort*  ctrl_ports;
-    int           n_ctrl_ports;
-    float*        ctrl_buffers;  /* one float per ctrl port, owned */
+    LilvInstance*      instance;
+    const LilvPlugin*  lp;          /* non-owning ref into LilvWorld */
+    uint32_t           n_ports;     /* total port count of hosted plugin */
+    ControlPort*       ctrl_ports;
+    int                n_ctrl_ports;
+    float*             ctrl_buffers;  /* one float per ctrl port, owned */
     /* audio port indices in the hosted plugin (-1 = absent) */
     int ai_l, ai_r, ao_l, ao_r;
-    char*         uri;           /* owned: the plugin URI that was loaded */
+    char*              uri;           /* owned: the plugin URI that was loaded */
 } HostedData;
 
 typedef struct {
@@ -455,6 +457,10 @@ static bool load_hosted_plugin(ModguiHost* plugin, const char* uri,
     lilv_node_free(lv2_max);
     lilv_node_free(lv2_default);
 
+    /* Store non-owning plugin reference for use in connect_hosted_ports */
+    out->lp      = lp;
+    out->n_ports = n_ports;
+
     /* Instantiate */
     out->instance = lilv_plugin_instantiate(lp, plugin->sample_rate, NULL);
     if (!out->instance) {
@@ -491,9 +497,9 @@ static void free_hosted_data(HostedData* d)
  */
 static void connect_hosted_ports(ModguiHost* plugin, HostedData* d)
 {
-    if (!d->instance) return;
-    const LilvPlugin* lp = lilv_instance_get_plugin(d->instance);
-    uint32_t n_ports = lilv_plugin_get_num_ports(lp);
+    if (!d->instance || !d->lp) return;
+    const LilvPlugin* lp     = d->lp;
+    uint32_t          n_ports = d->n_ports;
 
     LilvNode* control_class = lilv_new_uri(plugin->world, LV2_CORE__ControlPort);
     LilvNode* audio_class   = lilv_new_uri(plugin->world, LV2_CORE__AudioPort);
@@ -529,6 +535,7 @@ work(LV2_Handle                  instance,
      uint32_t                     size,
      const void*                  data)
 {
+    (void)size;
     ModguiHost* plugin = (ModguiHost*)instance;
     const char* uri    = (const char*)data;
 

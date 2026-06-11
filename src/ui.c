@@ -27,11 +27,11 @@
 /* ── Types ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    char* name;
-    char* uri;
-    char* bundle_path;
-    char* template_file;
-    char* resources_dir;
+    char*  name;           /* malloc-owned */
+    char*  uri;            /* malloc-owned */
+    gchar* bundle_path;    /* g_filename_from_uri, g_free */
+    gchar* template_file;  /* g_filename_from_uri, g_free */
+    gchar* resources_dir;  /* g_filename_from_uri, g_free */
 } PluginInfo;
 
 typedef struct {
@@ -148,8 +148,8 @@ static void discover_plugins(ModguiHostUI* ui)
         /* Bundle path */
         const LilvNode* bundle = lilv_plugin_get_bundle_uri(lp);
         if (bundle) {
-            const char* bpath = lilv_uri_to_path(lilv_node_as_uri(bundle));
-            p->bundle_path = bpath ? strdup(bpath) : NULL;
+            p->bundle_path =
+                g_filename_from_uri(lilv_node_as_uri(bundle), NULL, NULL);
         }
 
         /* modgui:gui node → template file */
@@ -157,14 +157,14 @@ static void discover_plugins(ModguiHostUI* ui)
         if (gui_node) {
             LilvNode* tmpl = lilv_world_get(ui->world, gui_node, tmpl_node, NULL);
             if (tmpl) {
-                const char* fpath = lilv_uri_to_path(lilv_node_as_uri(tmpl));
-                p->template_file = fpath ? strdup(fpath) : NULL;
+                p->template_file =
+                    g_filename_from_uri(lilv_node_as_uri(tmpl), NULL, NULL);
                 lilv_node_free(tmpl);
             }
             LilvNode* rdir = lilv_world_get(ui->world, gui_node, res_dir_node, NULL);
             if (rdir) {
-                const char* dpath = lilv_uri_to_path(lilv_node_as_uri(rdir));
-                p->resources_dir = dpath ? strdup(dpath) : NULL;
+                p->resources_dir =
+                    g_filename_from_uri(lilv_node_as_uri(rdir), NULL, NULL);
                 lilv_node_free(rdir);
             }
         }
@@ -184,9 +184,10 @@ static void free_plugin_info(PluginInfo* p)
     if (!p) return;
     free(p->name);
     free(p->uri);
-    free(p->bundle_path);
-    free(p->template_file);
-    free(p->resources_dir);
+    /* bundle_path, template_file, resources_dir are from g_filename_from_uri */
+    g_free(p->bundle_path);
+    g_free(p->template_file);
+    g_free(p->resources_dir);
     memset(p, 0, sizeof(*p));
 }
 

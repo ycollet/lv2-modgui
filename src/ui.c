@@ -515,11 +515,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     discover_plugins(ui);
 
     /* ── Build GTK UI ────────────────────────────────────────────────────── */
-    if (!gtk_init_check(NULL, NULL)) {
-        lv2_log_error(&ui->logger, "modgui-host UI: GTK init failed\n");
-        free(ui);
-        return NULL;
-    }
+    /* Do NOT call gtk_init here — the host (Carla) already owns GTK init. */
 
     ui->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_size_request(ui->root, 800, 600);
@@ -549,13 +545,32 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     /* Separator */
     GtkWidget* sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
 
-    /* WebKit web view */
+    /* WebKit web view
+     * Disable the sandbox and hardware acceleration: WebKit's GPU/sandbox
+     * subprocesses commonly crash when the plugin is embedded inside a host
+     * process like Carla.  These settings keep everything in-process. */
+    WebKitWebContext* wk_ctx = webkit_web_context_get_default();
+    webkit_web_context_set_sandbox_enabled(wk_ctx, FALSE);
+
+    WebKitSettings* wk_settings = webkit_settings_new();
+    webkit_settings_set_hardware_acceleration_policy(
+        wk_settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+    webkit_settings_set_enable_write_console_messages_to_stdout(
+        wk_settings, TRUE);
+
     WebKitUserContentManager* mgr = webkit_user_content_manager_new();
     webkit_user_content_manager_register_script_message_handler(mgr, "lv2");
     g_signal_connect(mgr, "script-message-received::lv2",
                      G_CALLBACK(on_script_message), ui);
 
-    ui->webview = GTK_WIDGET(webkit_web_view_new_with_user_content_manager(mgr));
+    ui->webview = GTK_WIDGET(
+        g_object_new(WEBKIT_TYPE_WEB_VIEW,
+                     "user-content-manager", mgr,
+                     "settings",             wk_settings,
+                     NULL));
+    g_object_unref(mgr);
+    g_object_unref(wk_settings);
+
     gtk_widget_set_hexpand(ui->webview, TRUE);
     gtk_widget_set_vexpand(ui->webview, TRUE);
 

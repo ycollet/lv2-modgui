@@ -15,7 +15,8 @@
 /* modgui namespace */
 #define MODGUI_NS                 "http://moddevices.com/ns/modgui#"
 #define MODGUI_GUI                MODGUI_NS "gui"
-#define MODGUI_TEMPLATE_FILE      MODGUI_NS "templateFile"
+#define MODGUI_ICON_TEMPLATE      MODGUI_NS "iconTemplate"    /* preferred */
+#define MODGUI_TEMPLATE_FILE      MODGUI_NS "templateFile"    /* fallback  */
 #define MODGUI_RESOURCES_DIR      MODGUI_NS "resourcesDirectory"
 #define MODGUI_JAVASCRIPT         MODGUI_NS "javascript"
 #define MODGUI_STYLESHEET         MODGUI_NS "stylesheet"

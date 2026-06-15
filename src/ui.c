@@ -127,8 +127,10 @@ static void discover_plugins(ModguiHostUI* ui)
     ui->plugin_list = (PluginInfo*)calloc((size_t)count, sizeof(PluginInfo));
     int idx = 0;
 
-    LilvNode* tmpl_node    = lilv_new_uri(ui->world, MODGUI_TEMPLATE_FILE);
-    LilvNode* res_dir_node = lilv_new_uri(ui->world, MODGUI_RESOURCES_DIR);
+    /* Try iconTemplate first (current MOD convention), fall back to templateFile */
+    LilvNode* icon_tmpl_node = lilv_new_uri(ui->world, MODGUI_ICON_TEMPLATE);
+    LilvNode* tmpl_node      = lilv_new_uri(ui->world, MODGUI_TEMPLATE_FILE);
+    LilvNode* res_dir_node   = lilv_new_uri(ui->world, MODGUI_RESOURCES_DIR);
 
     LILV_FOREACH(plugins, it, all) {
         const LilvPlugin* lp = lilv_plugins_get(all, it);
@@ -152,16 +154,20 @@ static void discover_plugins(ModguiHostUI* ui)
                 g_filename_from_uri(lilv_node_as_uri(bundle), NULL, NULL);
         }
 
-        /* modgui:gui node → template file */
+        /* modgui:gui node → template file (iconTemplate preferred) */
         LilvNode* gui_node = lilv_nodes_get_first(gui_nodes);
         if (gui_node) {
-            LilvNode* tmpl = lilv_world_get(ui->world, gui_node, tmpl_node, NULL);
+            LilvNode* tmpl = lilv_world_get(ui->world, gui_node,
+                                             icon_tmpl_node, NULL);
+            if (!tmpl)
+                tmpl = lilv_world_get(ui->world, gui_node, tmpl_node, NULL);
             if (tmpl) {
                 p->template_file =
                     g_filename_from_uri(lilv_node_as_uri(tmpl), NULL, NULL);
                 lilv_node_free(tmpl);
             }
-            LilvNode* rdir = lilv_world_get(ui->world, gui_node, res_dir_node, NULL);
+            LilvNode* rdir = lilv_world_get(ui->world, gui_node,
+                                             res_dir_node, NULL);
             if (rdir) {
                 p->resources_dir =
                     g_filename_from_uri(lilv_node_as_uri(rdir), NULL, NULL);
@@ -173,6 +179,7 @@ static void discover_plugins(ModguiHostUI* ui)
     }
 
     lilv_node_free(modgui_gui);
+    lilv_node_free(icon_tmpl_node);
     lilv_node_free(tmpl_node);
     lilv_node_free(res_dir_node);
 
@@ -296,52 +303,107 @@ static void send_param_change(ModguiHostUI* ui,
 
 /* ── Load modgui into WebKit ─────────────────────────────────────────────── */
 
+static gboolean on_load_failed(WebKitWebView*  webview,
+                                WebKitLoadEvent event,
+                                const gchar*    uri,
+                                GError*         error,
+                                gpointer        user_data)
+{
+    (void)webview; (void)event;
+    ModguiHostUI* ui = (ModguiHostUI*)user_data;
+    lv2_log_error(&ui->logger,
+                  "modgui-host: WebKit failed to load '%s': %s\n",
+                  uri ? uri : "(null)",
+                  error ? error->message : "unknown error");
+    return FALSE;
+}
+
 static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
 {
     if (!p->template_file) {
         lv2_log_warning(&ui->logger,
-                        "modgui-host: plugin %s has no template file\n",
+                        "modgui-host: plugin '%s' has no iconTemplate or "
+                        "templateFile in its modgui:gui node\n",
                         p->name ? p->name : p->uri);
         return;
     }
 
+    lv2_log_note(&ui->logger,
+                 "modgui-host: loading template %s\n", p->template_file);
+
     /* Read template HTML */
-    gchar* html = NULL;
-    gsize  html_len = 0;
-    GError* err = NULL;
+    gchar*  html     = NULL;
+    gsize   html_len = 0;
+    GError* err      = NULL;
     if (!g_file_get_contents(p->template_file, &html, &html_len, &err)) {
         lv2_log_error(&ui->logger,
-                      "modgui-host: cannot read %s: %s\n",
+                      "modgui-host: cannot read '%s': %s\n",
                       p->template_file, err ? err->message : "?");
         g_clear_error(&err);
         return;
     }
 
-    /* Build base URI from the resources directory (or bundle) */
-    const char* base_dir = p->resources_dir ? p->resources_dir : p->bundle_path;
-    char* base_uri = NULL;
+    /* Build base URI from the resources directory (or bundle).
+     * Must end with '/' so that relative paths (img, css, js) resolve
+     * relative to the directory, not its parent. */
+    const gchar* base_dir = p->resources_dir ? p->resources_dir
+                                              : p->bundle_path;
+    gchar* base_uri = NULL;
     if (base_dir) {
-        base_uri = g_filename_to_uri(base_dir, NULL, NULL);
+        gchar* dir_with_slash = g_str_has_suffix(base_dir, "/")
+                                ? g_strdup(base_dir)
+                                : g_strconcat(base_dir, "/", NULL);
+        base_uri = g_filename_to_uri(dir_with_slash, NULL, NULL);
+        g_free(dir_with_slash);
     }
 
-    /* Prepare bridge script injection */
+    lv2_log_note(&ui->logger,
+                 "modgui-host: base URI %s\n",
+                 base_uri ? base_uri : "(none)");
+
+    /* Prepare bridge script */
     gchar* bridge_js = NULL;
     if (ui->bridge_js_path) {
         gsize blen = 0;
         g_file_get_contents(ui->bridge_js_path, &bridge_js, &blen, NULL);
     }
 
-    /* Build the full page: inject bridge before the modgui content */
-    GString* page = g_string_new("<!DOCTYPE html><html><head>"
-                                  "<meta charset='utf-8'/>");
-    if (bridge_js) {
-        g_string_append(page, "<script>");
-        g_string_append(page, bridge_js);
-        g_string_append(page, "</script>");
+    /* Build page: inject bridge before the modgui content.
+     * The template HTML is treated as a full document fragment; we wrap it
+     * in a minimal outer shell only if it doesn't already have <html>. */
+    GString* page;
+    if (g_strstr_len(html, (gssize)html_len, "<html") ||
+        g_strstr_len(html, (gssize)html_len, "<HTML")) {
+        /* Full document — inject bridge into an existing <head> if present,
+         * or prepend a <script> block before the content. */
+        page = g_string_new("");
+        if (bridge_js) {
+            g_string_append(page, "<script>");
+            g_string_append(page, bridge_js);
+            g_string_append(page, "</script>");
+        }
+        g_string_append_len(page, html, (gssize)html_len);
+    } else {
+        /* Partial template — wrap it */
+        page = g_string_new("<!DOCTYPE html><html><head>"
+                             "<meta charset='utf-8'/>");
+        if (bridge_js) {
+            g_string_append(page, "<script>");
+            g_string_append(page, bridge_js);
+            g_string_append(page, "</script>");
+        }
+        g_string_append(page, "</head><body>");
+        g_string_append_len(page, html, (gssize)html_len);
+        g_string_append(page, "</body></html>");
     }
-    g_string_append(page, "</head><body>");
-    g_string_append_len(page, html, (gssize)html_len);
-    g_string_append(page, "</body></html>");
+
+    /* Connect load-failed signal once (guard against double-connect) */
+    if (!g_signal_handler_find(ui->webview,
+                                G_SIGNAL_MATCH_FUNC, 0, 0, NULL,
+                                G_CALLBACK(on_load_failed), ui)) {
+        g_signal_connect(ui->webview, "load-failed",
+                         G_CALLBACK(on_load_failed), ui);
+    }
 
     webkit_web_view_load_html((WebKitWebView*)ui->webview,
                                page->str,

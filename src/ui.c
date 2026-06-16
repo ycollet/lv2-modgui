@@ -8,6 +8,7 @@
 #include <lv2/ui/ui.h>
 #include <lv2/log/log.h>
 #include <lv2/log/logger.h>
+#include <lv2/midi/midi.h>
 
 #include <lilv/lilv.h>
 
@@ -17,6 +18,7 @@
  * The WEBKIT_API_40 flag only controls which JS evaluation API to use. */
 #include <webkit2/webkit2.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -326,6 +328,163 @@ static void send_param_change(ModguiHostUI* ui,
                        atom);
 }
 
+/* ── Plugin JSON builder ─────────────────────────────────────────────────── */
+
+static gchar* json_escape_string(const char* s)
+{
+    if (!s) return g_strdup("\"\"");
+    GString* out = g_string_new("\"");
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+        switch (*p) {
+        case '"':  g_string_append(out, "\\\""); break;
+        case '\\': g_string_append(out, "\\\\"); break;
+        case '\n': g_string_append(out, "\\n");  break;
+        case '\r': g_string_append(out, "\\r");  break;
+        case '\t': g_string_append(out, "\\t");  break;
+        default:
+            if (*p < 0x20)
+                g_string_append_printf(out, "\\u%04x", (unsigned)*p);
+            else
+                g_string_append_c(out, (char)*p);
+            break;
+        }
+    }
+    g_string_append_c(out, '"');
+    return g_string_free(out, FALSE);
+}
+
+static gchar* build_plugin_json(LilvWorld* world,
+                                 const char* plugin_uri,
+                                 const char* plugin_name)
+{
+    LilvNode* uri_node = lilv_new_uri(world, plugin_uri);
+    const LilvPlugin* lp =
+        lilv_plugins_get_by_uri(lilv_world_get_all_plugins(world), uri_node);
+    lilv_node_free(uri_node);
+    if (!lp) return g_strdup("{}");
+
+    LilvNode* audio_class   = lilv_new_uri(world, LV2_CORE__AudioPort);
+    LilvNode* control_class = lilv_new_uri(world, LV2_CORE__ControlPort);
+    LilvNode* input_class   = lilv_new_uri(world, LV2_CORE__InputPort);
+    LilvNode* output_class  = lilv_new_uri(world, LV2_CORE__OutputPort);
+    LilvNode* atom_class    = lilv_new_uri(world, LV2_ATOM__AtomPort);
+    LilvNode* supports_node = lilv_new_uri(world, LV2_ATOM__supports);
+    LilvNode* midi_event    = lilv_new_uri(world, LV2_MIDI__MidiEvent);
+    LilvNode* lv2_min       = lilv_new_uri(world, LV2_CORE__minimum);
+    LilvNode* lv2_max       = lilv_new_uri(world, LV2_CORE__maximum);
+
+    uint32_t n_ports = lilv_plugin_get_num_ports(lp);
+    float* defaults = (float*)calloc(n_ports, sizeof(float));
+    lilv_plugin_get_port_ranges_float(lp, NULL, NULL, defaults);
+
+    GString* audio_in  = g_string_new("[");
+    GString* audio_out = g_string_new("[");
+    GString* midi_in   = g_string_new("[");
+    GString* midi_out  = g_string_new("[");
+    GString* ctrl_in   = g_string_new("[");
+    GString* ctrl_out  = g_string_new("[");
+    bool first[6]      = {true, true, true, true, true, true};
+
+    for (uint32_t i = 0; i < n_ports; i++) {
+        const LilvPort* port = lilv_plugin_get_port_by_index(lp, i);
+
+        bool is_in      = lilv_port_is_a(lp, port, input_class);
+        bool is_audio   = lilv_port_is_a(lp, port, audio_class);
+        bool is_control = lilv_port_is_a(lp, port, control_class);
+        bool is_atom    = lilv_port_is_a(lp, port, atom_class);
+
+        bool is_midi = false;
+        if (is_atom) {
+            LilvNodes* sup = lilv_port_get_value(lp, port, supports_node);
+            if (sup) {
+                is_midi = lilv_nodes_contains(sup, midi_event);
+                lilv_nodes_free(sup);
+            }
+        }
+
+        const LilvNode* sym_node  = lilv_port_get_symbol(lp, port);
+        LilvNode*        name_node = lilv_port_get_name(lp, port);
+        const char* sym   = sym_node  ? lilv_node_as_string(sym_node)  : "";
+        const char* pname = name_node ? lilv_node_as_string(name_node) : sym;
+
+        gchar* jsym  = json_escape_string(sym);
+        gchar* jname = json_escape_string(pname);
+
+        GString* arr  = NULL;
+        int      fi   = -1;
+
+        if (is_audio) {
+            arr = is_in ? audio_in  : audio_out;
+            fi  = is_in ? 0 : 1;
+            if (!first[fi]) g_string_append_c(arr, ',');
+            g_string_append_printf(arr,
+                "{\"index\":%u,\"symbol\":%s,\"name\":%s}", i, jsym, jname);
+        } else if (is_midi) {
+            arr = is_in ? midi_in  : midi_out;
+            fi  = is_in ? 2 : 3;
+            if (!first[fi]) g_string_append_c(arr, ',');
+            g_string_append_printf(arr,
+                "{\"index\":%u,\"symbol\":%s,\"name\":%s}", i, jsym, jname);
+        } else if (is_control) {
+            arr = is_in ? ctrl_in  : ctrl_out;
+            fi  = is_in ? 4 : 5;
+
+            LilvNode* mn = lilv_port_get(lp, port, lv2_min);
+            LilvNode* mx = lilv_port_get(lp, port, lv2_max);
+            float min_v = mn ? lilv_node_as_float(mn) : 0.0f;
+            float max_v = mx ? lilv_node_as_float(mx) : 1.0f;
+            float def_v = isnan(defaults[i]) ? min_v : defaults[i];
+            lilv_node_free(mn);
+            lilv_node_free(mx);
+
+            if (!first[fi]) g_string_append_c(arr, ',');
+            g_string_append_printf(arr,
+                "{\"index\":%u,\"symbol\":%s,\"name\":%s,"
+                "\"minimum\":%.6g,\"maximum\":%.6g,\"default\":%.6g,"
+                "\"value\":%.6g}",
+                i, jsym, jname,
+                (double)min_v, (double)max_v, (double)def_v, (double)def_v);
+        }
+
+        if (fi >= 0) first[fi] = false;
+        g_free(jsym);
+        g_free(jname);
+        lilv_node_free(name_node);
+    }
+
+    free(defaults);
+    g_string_append_c(audio_in, ']'); g_string_append_c(audio_out, ']');
+    g_string_append_c(midi_in,  ']'); g_string_append_c(midi_out,  ']');
+    g_string_append_c(ctrl_in,  ']'); g_string_append_c(ctrl_out,  ']');
+
+    gchar* juri  = json_escape_string(plugin_uri);
+    gchar* jname = json_escape_string(plugin_name);
+    gchar* result = g_strdup_printf(
+        "{\"effect\":{"
+          "\"uri\":%s,\"name\":%s,"
+          "\"ports\":{"
+            "\"audio\":{\"input\":%s,\"output\":%s},"
+            "\"midi\":{\"input\":%s,\"output\":%s},"
+            "\"control\":{\"input\":%s,\"output\":%s}"
+        "}}}",
+        juri, jname,
+        audio_in->str, audio_out->str,
+        midi_in->str,  midi_out->str,
+        ctrl_in->str,  ctrl_out->str);
+
+    g_free(juri); g_free(jname);
+    g_string_free(audio_in, TRUE); g_string_free(audio_out, TRUE);
+    g_string_free(midi_in,  TRUE); g_string_free(midi_out,  TRUE);
+    g_string_free(ctrl_in,  TRUE); g_string_free(ctrl_out,  TRUE);
+    lilv_node_free(audio_class);  lilv_node_free(control_class);
+    lilv_node_free(input_class);  lilv_node_free(output_class);
+    lilv_node_free(atom_class);   lilv_node_free(supports_node);
+    lilv_node_free(midi_event);   lilv_node_free(lv2_min);
+    lilv_node_free(lv2_max);
+
+    return result;
+}
+
 /* ── Load modgui into WebKit ─────────────────────────────────────────────── */
 
 static gboolean on_load_failed(WebKitWebView*  webview,
@@ -386,6 +545,9 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
                  "modgui-host: base URI %s\n",
                  base_uri ? base_uri : "(none)");
 
+    /* Build plugin data JSON for Handlebars template rendering */
+    gchar* plugin_json = build_plugin_json(ui->world, p->uri, p->name);
+
     /* Prepare bridge script */
     gchar* bridge_js = NULL;
     if (ui->bridge_js_path) {
@@ -393,34 +555,29 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
         g_file_get_contents(ui->bridge_js_path, &bridge_js, &blen, NULL);
     }
 
-    /* Build page: inject bridge before the modgui content.
-     * The template HTML is treated as a full document fragment; we wrap it
-     * in a minimal outer shell only if it doesn't already have <html>. */
-    GString* page;
-    if (g_strstr_len(html, (gssize)html_len, "<html") ||
-        g_strstr_len(html, (gssize)html_len, "<HTML")) {
-        /* Full document — inject bridge into an existing <head> if present,
-         * or prepend a <script> block before the content. */
-        page = g_string_new("");
-        if (bridge_js) {
-            g_string_append(page, "<script>");
-            g_string_append(page, bridge_js);
-            g_string_append(page, "</script>");
-        }
-        g_string_append_len(page, html, (gssize)html_len);
-    } else {
-        /* Partial template — wrap it */
-        page = g_string_new("<!DOCTYPE html><html><head>"
-                             "<meta charset='utf-8'/>");
-        if (bridge_js) {
-            g_string_append(page, "<script>");
-            g_string_append(page, bridge_js);
-            g_string_append(page, "</script>");
-        }
-        g_string_append(page, "</head><body>");
-        g_string_append_len(page, html, (gssize)html_len);
-        g_string_append(page, "</body></html>");
+    /* Build page: always wrap the template in a minimal shell so we can
+     * inject __MOD_DATA__ and bridge.js reliably in <head>.
+     * bridge.js renders the Handlebars template on DOMContentLoaded. */
+    GString* page = g_string_new(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'/>");
+
+    /* 1. Plugin data (must come before bridge.js) */
+    if (plugin_json) {
+        g_string_append(page, "<script>window.__MOD_DATA__=");
+        g_string_append(page, plugin_json);
+        g_string_append(page, ";</script>");
     }
+
+    /* 2. Bridge + mini Handlebars */
+    if (bridge_js) {
+        g_string_append(page, "<script>");
+        g_string_append(page, bridge_js);
+        g_string_append(page, "</script>");
+    }
+
+    g_string_append(page, "</head><body>");
+    g_string_append_len(page, html, (gssize)html_len);
+    g_string_append(page, "</body></html>");
 
     /* Connect load-failed signal once (guard against double-connect) */
     if (!g_signal_handler_find(ui->webview,
@@ -437,6 +594,7 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     g_string_free(page, TRUE);
     g_free(html);
     g_free(bridge_js);
+    g_free(plugin_json);
     g_free(base_uri);
 }
 

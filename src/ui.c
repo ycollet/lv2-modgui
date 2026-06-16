@@ -154,24 +154,49 @@ static void discover_plugins(ModguiHostUI* ui)
                 g_filename_from_uri(lilv_node_as_uri(bundle), NULL, NULL);
         }
 
-        /* modgui:gui node → template file (iconTemplate preferred) */
+        /* modgui:gui value: either a blank node with properties, or a direct
+         * URI pointing at the resources directory (older convention). */
         LilvNode* gui_node = lilv_nodes_get_first(gui_nodes);
         if (gui_node) {
-            LilvNode* tmpl = lilv_world_get(ui->world, gui_node,
-                                             icon_tmpl_node, NULL);
-            if (!tmpl)
-                tmpl = lilv_world_get(ui->world, gui_node, tmpl_node, NULL);
-            if (tmpl) {
-                p->template_file =
-                    g_filename_from_uri(lilv_node_as_uri(tmpl), NULL, NULL);
-                lilv_node_free(tmpl);
-            }
-            LilvNode* rdir = lilv_world_get(ui->world, gui_node,
-                                             res_dir_node, NULL);
-            if (rdir) {
+            if (lilv_node_is_uri(gui_node)) {
+                /* Direct URI form: <plugin> modgui:gui <modgui/> .
+                 * The URI is the resources directory itself. */
                 p->resources_dir =
-                    g_filename_from_uri(lilv_node_as_uri(rdir), NULL, NULL);
-                lilv_node_free(rdir);
+                    g_filename_from_uri(lilv_node_as_uri(gui_node), NULL, NULL);
+            } else {
+                /* Blank-node form: modgui:gui [ modgui:iconTemplate <…> ; … ] */
+                LilvNode* tmpl = lilv_world_get(ui->world, gui_node,
+                                                 icon_tmpl_node, NULL);
+                if (!tmpl)
+                    tmpl = lilv_world_get(ui->world, gui_node,
+                                          tmpl_node, NULL);
+                if (tmpl) {
+                    p->template_file =
+                        g_filename_from_uri(lilv_node_as_uri(tmpl), NULL, NULL);
+                    lilv_node_free(tmpl);
+                }
+                LilvNode* rdir = lilv_world_get(ui->world, gui_node,
+                                                 res_dir_node, NULL);
+                if (rdir) {
+                    p->resources_dir =
+                        g_filename_from_uri(lilv_node_as_uri(rdir), NULL, NULL);
+                    lilv_node_free(rdir);
+                }
+            }
+        }
+
+        /* Fallback: search for common template filenames in resources dir */
+        if (!p->template_file && p->resources_dir) {
+            static const char* const candidates[] = {
+                "icon.html", "template.html", "index.html", NULL
+            };
+            for (int k = 0; candidates[k] && !p->template_file; k++) {
+                gchar* path = g_build_filename(p->resources_dir,
+                                               candidates[k], NULL);
+                if (g_file_test(path, G_FILE_TEST_EXISTS))
+                    p->template_file = path;
+                else
+                    g_free(path);
             }
         }
 

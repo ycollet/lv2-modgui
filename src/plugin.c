@@ -353,10 +353,7 @@ static void run(LV2_Handle instance, uint32_t n_samples)
 static void cleanup(LV2_Handle instance)
 {
     ModguiHost* plugin = (ModguiHost*)instance;
-    if (plugin->hosted.instance) {
-        lilv_instance_deactivate(plugin->hosted.instance);
-        lilv_instance_free(plugin->hosted.instance);
-    }
+    /* free_hosted_data handles deactivate + free — don't do it separately */
     free_hosted_data(&plugin->hosted);
     free(plugin->hosted_plugin_uri);
     if (plugin->world)

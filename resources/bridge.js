@@ -158,7 +158,6 @@
     if (label) label.textContent = (Math.round(value * 100) / 100).toFixed(2);
 
     el.style.setProperty('--mod-value-norm', norm);
-    (void)port;
   }
 
   /* ── Control initialisation ────────────────────────────────────────────── */

@@ -431,9 +431,14 @@ static gchar* build_plugin_json(LilvWorld* world,
 
             LilvNode* mn = lilv_port_get(lp, port, lv2_min);
             LilvNode* mx = lilv_port_get(lp, port, lv2_max);
-            float min_v = mn ? lilv_node_as_float(mn) : 0.0f;
-            float max_v = mx ? lilv_node_as_float(mx) : 1.0f;
-            float def_v = isnan(defaults[i]) ? min_v : defaults[i];
+            float min_v = (mn && lilv_node_is_float(mn))
+                          ? lilv_node_as_float(mn) : 0.0f;
+            float max_v = (mx && lilv_node_is_float(mx))
+                          ? lilv_node_as_float(mx) : 1.0f;
+            /* Sanitise: nan/inf are not valid JSON/JS tokens */
+            if (!isfinite(min_v)) min_v = 0.0f;
+            if (!isfinite(max_v)) max_v = 1.0f;
+            float def_v = isfinite(defaults[i]) ? defaults[i] : min_v;
             lilv_node_free(mn);
             lilv_node_free(mx);
 

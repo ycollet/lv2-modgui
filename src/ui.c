@@ -34,6 +34,7 @@ typedef struct {
     gchar* bundle_path;    /* g_filename_from_uri, g_free */
     gchar* template_file;  /* g_filename_from_uri, g_free */
     gchar* resources_dir;  /* g_filename_from_uri, g_free */
+    gchar* stylesheet;     /* g_filename_from_uri, g_free */
 } PluginInfo;
 
 typedef struct {
@@ -133,6 +134,7 @@ static void discover_plugins(ModguiHostUI* ui)
     LilvNode* icon_tmpl_node = lilv_new_uri(ui->world, MODGUI_ICON_TEMPLATE);
     LilvNode* tmpl_node      = lilv_new_uri(ui->world, MODGUI_TEMPLATE_FILE);
     LilvNode* res_dir_node   = lilv_new_uri(ui->world, MODGUI_RESOURCES_DIR);
+    LilvNode* style_node     = lilv_new_uri(ui->world, MODGUI_STYLESHEET);
 
     LILV_FOREACH(plugins, it, all) {
         const LilvPlugin* lp = lilv_plugins_get(all, it);
@@ -184,6 +186,13 @@ static void discover_plugins(ModguiHostUI* ui)
                         g_filename_from_uri(lilv_node_as_uri(rdir), NULL, NULL);
                     lilv_node_free(rdir);
                 }
+                LilvNode* style = lilv_world_get(ui->world, gui_node,
+                                                  style_node, NULL);
+                if (style) {
+                    p->stylesheet =
+                        g_filename_from_uri(lilv_node_as_uri(style), NULL, NULL);
+                    lilv_node_free(style);
+                }
             }
         }
 
@@ -209,6 +218,7 @@ static void discover_plugins(ModguiHostUI* ui)
     lilv_node_free(icon_tmpl_node);
     lilv_node_free(tmpl_node);
     lilv_node_free(res_dir_node);
+    lilv_node_free(style_node);
 
     ui->n_plugins = idx;
 }
@@ -218,10 +228,11 @@ static void free_plugin_info(PluginInfo* p)
     if (!p) return;
     free(p->name);
     free(p->uri);
-    /* bundle_path, template_file, resources_dir are from g_filename_from_uri */
+    /* bundle_path, template_file, resources_dir, stylesheet from g_filename_from_uri */
     g_free(p->bundle_path);
     g_free(p->template_file);
     g_free(p->resources_dir);
+    g_free(p->stylesheet);
     memset(p, 0, sizeof(*p));
 }
 
@@ -490,6 +501,30 @@ static gchar* build_plugin_json(LilvWorld* world,
     return result;
 }
 
+/* ── CSS preprocessing helpers ───────────────────────────────────────────── */
+
+static gchar* str_replace_all(const gchar* src,
+                               const gchar* find,
+                               const gchar* replace)
+{
+    gchar** parts = g_strsplit(src, find, -1);
+    gchar*  result = g_strjoinv(replace, parts);
+    g_strfreev(parts);
+    return result;
+}
+
+/* Prepare a modgui CSS string for local use:
+ *   1. Strip MOD server-side {{{ns}}} cache-busting tokens.
+ *   2. Rewrite absolute /resources/ URL prefixes to bare filenames so they
+ *      resolve against the base_uri (the plugin's modgui directory). */
+static gchar* preprocess_css(const gchar* css)
+{
+    gchar* s1 = str_replace_all(css, "{{{ns}}}", "");
+    gchar* s2 = str_replace_all(s1, "url(/resources/", "url(");
+    g_free(s1);
+    return s2;
+}
+
 /* ── Load modgui into WebKit ─────────────────────────────────────────────── */
 
 static gboolean on_load_failed(WebKitWebView*  webview,
@@ -578,6 +613,20 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
         g_string_append(page, "<script>");
         g_string_append(page, bridge_js);
         g_string_append(page, "</script>");
+    }
+
+    /* 3. Plugin stylesheet (preprocessed: strip {{{ns}}}, rewrite /resources/) */
+    if (p->stylesheet) {
+        gchar* raw_css = NULL;
+        gsize  css_len = 0;
+        if (g_file_get_contents(p->stylesheet, &raw_css, &css_len, NULL)) {
+            gchar* css = preprocess_css(raw_css);
+            g_free(raw_css);
+            g_string_append(page, "<style>");
+            g_string_append(page, css);
+            g_string_append(page, "</style>");
+            g_free(css);
+        }
     }
 
     g_string_append(page, "</head><body>");

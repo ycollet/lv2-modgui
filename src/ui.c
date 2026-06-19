@@ -91,6 +91,8 @@ typedef struct {
 static void     discover_plugins(ModguiHostUI* ui);
 static void     free_plugin_info(PluginInfo* p);
 static void     on_load_plugin_clicked(GtkButton* btn, gpointer user_data);
+static void     on_row_activated(GtkTreeView* view, GtkTreePath* path,
+                                  GtkTreeViewColumn* col, gpointer dialog_ptr);
 static void     load_modgui(ModguiHostUI* ui, const PluginInfo* p);
 static void     send_hosted_uri(ModguiHostUI* ui, const char* uri);
 static void     send_param_change(ModguiHostUI* ui,
@@ -289,6 +291,18 @@ on_script_message(WebKitUserContentManager* mgr,
             send_param_change(ui, sym, (float)dval);
             g_free(sym);
         }
+    } else if (type_str && strcmp(type_str, "contentReady") == 0) {
+        JSCValue* w_v = jsc_value_object_get_property(val, "width");
+        JSCValue* h_v = jsc_value_object_get_property(val, "height");
+        if (w_v && h_v &&
+            jsc_value_is_number(w_v) && jsc_value_is_number(h_v)) {
+            gint w = (gint)jsc_value_to_double(w_v);
+            gint h = (gint)jsc_value_to_double(h_v);
+            if (w > 0 && h > 0)
+                gtk_widget_set_size_request(ui->webview, w, h);
+        }
+        if (w_v) g_object_unref(w_v);
+        if (h_v) g_object_unref(h_v);
     }
     g_free(type_str);
 
@@ -629,6 +643,15 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
         }
     }
 
+    /* 4. Global overrides: disable the MOD drag-handle overlay so it never
+     *    swallows pointer events, and strip default body margin/scroll. */
+    g_string_append(page,
+        "<style>"
+        "[mod-role=\"drag-handle\"],.mod-drag-handle"
+            "{pointer-events:none!important}"
+        "body{margin:0;padding:0;overflow:hidden}"
+        "</style>");
+
     g_string_append(page, "</head><body>");
     g_string_append_len(page, html, (gssize)html_len);
     g_string_append(page, "</body></html>");
@@ -653,6 +676,13 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
 }
 
 /* ── Plugin picker dialog ─────────────────────────────────────────────────── */
+
+static void on_row_activated(GtkTreeView* view, GtkTreePath* path,
+                               GtkTreeViewColumn* col, gpointer dialog_ptr)
+{
+    (void)view; (void)path; (void)col;
+    gtk_dialog_response(GTK_DIALOG(dialog_ptr), GTK_RESPONSE_ACCEPT);
+}
 
 static void on_load_plugin_clicked(GtkButton* btn, gpointer user_data)
 {
@@ -704,6 +734,10 @@ static void on_load_plugin_clicked(GtkButton* btn, gpointer user_data)
 
     gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(tree), TRUE);
 
+    /* Double-click on a row immediately accepts the dialog */
+    g_signal_connect(tree, "row-activated",
+                     G_CALLBACK(on_row_activated), dialog);
+
     GtkWidget* scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
                                    GTK_POLICY_AUTOMATIC,
@@ -734,6 +768,8 @@ static void on_load_plugin_clicked(GtkButton* btn, gpointer user_data)
             }
 
             if (chosen) {
+                ui->current_plugin = chosen;
+
                 /* Update label */
                 gtk_label_set_text(GTK_LABEL(ui->plugin_label),
                                    chosen->name ? chosen->name : chosen->uri);
@@ -939,7 +975,22 @@ port_event(LV2UI_Handle  handle,
         if (prop && value &&
             prop->body == ui->urid.hosted_plugin_uri &&
             value->type == ui->urid.atom_String) {
-            /* DSP confirms which plugin is loaded — nothing extra needed */
+            const char* uri_str = (const char*)LV2_ATOM_BODY_CONST(value);
+            /* Only restore if different from what's already showing */
+            if (!ui->current_plugin ||
+                strcmp(ui->current_plugin->uri, uri_str) != 0) {
+                for (int i = 0; i < ui->n_plugins; i++) {
+                    if (strcmp(ui->plugin_list[i].uri, uri_str) == 0) {
+                        ui->current_plugin = &ui->plugin_list[i];
+                        gtk_label_set_text(
+                            GTK_LABEL(ui->plugin_label),
+                            ui->plugin_list[i].name
+                                ? ui->plugin_list[i].name : uri_str);
+                        load_modgui(ui, &ui->plugin_list[i]);
+                        break;
+                    }
+                }
+            }
         }
         return;
     }

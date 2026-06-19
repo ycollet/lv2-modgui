@@ -293,6 +293,20 @@
     renderTemplate();   /* Handlebars → real HTML */
     createWidget();
     initControls();
+
+    /* Report rendered content size so the host can resize the view */
+    if (window.webkit &&
+        window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.lv2) {
+      requestAnimationFrame(function () {
+        var root = document.querySelector('.mod-pedal') || document.body;
+        window.webkit.messageHandlers.lv2.postMessage({
+          type:   'contentReady',
+          width:  root.scrollWidth  || root.offsetWidth  || 0,
+          height: root.scrollHeight || root.offsetHeight || 0,
+        });
+      });
+    }
   }
 
   if (document.readyState === 'loading') {

@@ -94,6 +94,9 @@ typedef struct {
     uint8_t dummy_atom[ATOM_BUF_SIZE];
 
     double sample_rate;
+
+    /* Set by work_response() to make run() push the loaded URI to the UI */
+    bool send_uri_to_ui;
 } ModguiHost;
 
 /* ── Forward declarations ────────────────────────────────────────────────── */
@@ -344,6 +347,22 @@ static void run(LV2_Handle instance, uint32_t n_samples)
                    n_samples * sizeof(float));
     }
 
+    /* Notify UI of newly loaded plugin URI (set by work_response) */
+    if (plugin->send_uri_to_ui && plugin->hosted_plugin_uri && plugin->events_out) {
+        plugin->send_uri_to_ui = false;
+        LV2_Atom_Forge_Frame obj_frame;
+        lv2_atom_forge_frame_time(&plugin->forge, 0);
+        lv2_atom_forge_object(&plugin->forge, &obj_frame, 0,
+                              plugin->urid.patch_Set);
+        lv2_atom_forge_key(&plugin->forge, plugin->urid.patch_property);
+        lv2_atom_forge_urid(&plugin->forge, plugin->urid.hosted_plugin_uri);
+        lv2_atom_forge_key(&plugin->forge, plugin->urid.patch_value);
+        lv2_atom_forge_string(&plugin->forge,
+                              plugin->hosted_plugin_uri,
+                              strlen(plugin->hosted_plugin_uri));
+        lv2_atom_forge_pop(&plugin->forge, &obj_frame);
+    }
+
     if (plugin->events_out)
         lv2_atom_forge_pop(&plugin->forge, &seq_frame);
 }
@@ -573,6 +592,9 @@ work_response(LV2_Handle instance, uint32_t size, const void* data)
 
     /* Activate */
     lilv_instance_activate(plugin->hosted.instance);
+
+    /* Tell run() to push the URI to the UI on the next cycle */
+    plugin->send_uri_to_ui = true;
 
     /* Free old data — safe here since we're in work_response (audio thread),
      * old instance is already detached */

@@ -103,11 +103,7 @@ static void     send_hosted_uri(ModguiHostUI* ui, const char* uri);
 static void     send_param_change(ModguiHostUI* ui,
                                    const char* symbol, float value);
 static void     on_script_message(WebKitUserContentManager* mgr,
-#ifdef WEBKIT_API_40
                                    WebKitJavascriptResult* result,
-#else
-                                   JSCValue*               result,
-#endif
                                    gpointer user_data);
 static gboolean run_js(ModguiHostUI* ui, const char* script);
 
@@ -263,21 +259,15 @@ static gboolean run_js(ModguiHostUI* ui, const char* script)
 
 static void
 on_script_message(WebKitUserContentManager* mgr,
-#ifdef WEBKIT_API_40
                   WebKitJavascriptResult*   result,
-#else
-                  JSCValue*                 result,
-#endif
                   gpointer                  user_data)
 {
     (void)mgr;
     ModguiHostUI* ui = (ModguiHostUI*)user_data;
 
-#ifdef WEBKIT_API_40
+    /* Both webkit2gtk-4.0 and -4.1 pass WebKitJavascriptResult* here.
+       Only webkit2gtk-6.0 (GTK4) changed the signal to pass JSCValue* directly. */
     JSCValue* val = webkit_javascript_result_get_js_value(result);
-#else
-    JSCValue* val = result;
-#endif
 
     if (!jsc_value_is_object(val)) return;
 
@@ -987,7 +977,8 @@ static void
 cleanup(LV2UI_Handle handle)
 {
     ModguiHostUI* ui = (ModguiHostUI*)handle;
-    if (ui->root) gtk_widget_destroy(ui->root);
+    /* ui->root is owned by the host after we returned it as LV2UI_Widget;
+       the host destroys it — calling gtk_widget_destroy here double-frees. */
     for (int i = 0; i < ui->n_plugins; i++)
         free_plugin_info(&ui->plugin_list[i]);
     free(ui->plugin_list);

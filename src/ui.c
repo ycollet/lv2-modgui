@@ -759,7 +759,7 @@ static void on_load_plugin_clicked(GtkButton* btn, gpointer user_data)
             gtk_tree_model_get(model, &iter, 0, &name, 1, &uri, -1);
 
             /* Find the full PluginInfo */
-            const PluginInfo* chosen = NULL;
+            PluginInfo* chosen = NULL;
             for (int i = 0; i < ui->n_plugins; i++) {
                 if (uri && strcmp(ui->plugin_list[i].uri, uri) == 0) {
                     chosen = &ui->plugin_list[i];

@@ -392,6 +392,13 @@ static gchar* json_escape_string(const char* s)
     return g_string_free(out, FALSE);
 }
 
+/* Helper for sorting modgui:port entries by lv2:index */
+typedef struct { int idx; gchar* sym; gchar* name; } ModguiCtrlEntry;
+
+static gint cmp_modgui_ctrl(gconstpointer a, gconstpointer b) {
+    return ((const ModguiCtrlEntry*)a)->idx - ((const ModguiCtrlEntry*)b)->idx;
+}
+
 static gchar* build_plugin_json(LilvWorld* world,
                                  const char* plugin_uri,
                                  const char* plugin_name)
@@ -411,6 +418,18 @@ static gchar* build_plugin_json(LilvWorld* world,
     LilvNode* midi_event    = lilv_new_uri(world, LV2_MIDI__MidiEvent);
     LilvNode* lv2_min       = lilv_new_uri(world, LV2_CORE__minimum);
     LilvNode* lv2_max       = lilv_new_uri(world, LV2_CORE__maximum);
+    /* modgui namespace — brand/label/color/knob/port */
+#define MODGUI_NS "http://moddevices.com/ns/modgui#"
+    LilvNode* mg_gui_pred   = lilv_new_uri(world, MODGUI_NS "gui");
+    LilvNode* mg_brand_pred = lilv_new_uri(world, MODGUI_NS "brand");
+    LilvNode* mg_label_pred = lilv_new_uri(world, MODGUI_NS "label");
+    LilvNode* mg_color_pred = lilv_new_uri(world, MODGUI_NS "color");
+    LilvNode* mg_knob_pred  = lilv_new_uri(world, MODGUI_NS "knob");
+    LilvNode* mg_port_pred  = lilv_new_uri(world, MODGUI_NS "port");
+    LilvNode* lv2_name_pred = lilv_new_uri(world, LV2_CORE__name);
+    LilvNode* lv2_sym_pred  = lilv_new_uri(world, LV2_CORE__symbol);
+    LilvNode* lv2_idx_pred  = lilv_new_uri(world,
+                                            "http://lv2plug.in/ns/lv2core#index");
 
     uint32_t n_ports = lilv_plugin_get_num_ports(lp);
     float* defaults = (float*)calloc(n_ports, sizeof(float));
@@ -501,22 +520,112 @@ static gchar* build_plugin_json(LilvWorld* world,
     g_string_append_c(midi_in,  ']'); g_string_append_c(midi_out,  ']');
     g_string_append_c(ctrl_in,  ']'); g_string_append_c(ctrl_out,  ']');
 
-    gchar* juri  = json_escape_string(plugin_uri);
-    gchar* jname = json_escape_string(plugin_name);
-    gchar* result = g_strdup_printf(
-        "{\"effect\":{"
-          "\"uri\":%s,\"name\":%s,"
-          "\"ports\":{"
-            "\"audio\":{\"input\":%s,\"output\":%s},"
-            "\"midi\":{\"input\":%s,\"output\":%s},"
-            "\"control\":{\"input\":%s,\"output\":%s}"
-        "}}}",
+    /* Query modgui:gui blank node for brand/label/color/knob/controls */
+    gchar* mg_brand_val = g_strdup("");
+    gchar* mg_label_val = g_strdup(plugin_name ? plugin_name : "");
+    gchar* mg_color_val = g_strdup("");
+    gchar* mg_knob_val  = g_strdup("");
+    GString* controls   = g_string_new("[");
+    bool first_ctrl     = true;
+
+    GArray* ctrl_arr  = g_array_new(FALSE, FALSE, sizeof(ModguiCtrlEntry));
+    LilvNodes* gui_ns = lilv_plugin_get_value(lp, mg_gui_pred);
+    if (gui_ns && lilv_nodes_size(gui_ns) > 0) {
+        const LilvNode* gn = lilv_nodes_get_first(gui_ns);
+        LilvNode* v;
+        if ((v = lilv_world_get(world, gn, mg_brand_pred, NULL))) {
+            g_free(mg_brand_val);
+            mg_brand_val = g_strdup(lilv_node_as_string(v));
+            lilv_node_free(v);
+        }
+        if ((v = lilv_world_get(world, gn, mg_label_pred, NULL))) {
+            g_free(mg_label_val);
+            mg_label_val = g_strdup(lilv_node_as_string(v));
+            lilv_node_free(v);
+        }
+        if ((v = lilv_world_get(world, gn, mg_color_pred, NULL))) {
+            g_free(mg_color_val);
+            mg_color_val = g_strdup(lilv_node_as_string(v));
+            lilv_node_free(v);
+        }
+        if ((v = lilv_world_get(world, gn, mg_knob_pred, NULL))) {
+            g_free(mg_knob_val);
+            mg_knob_val = g_strdup(lilv_node_as_string(v));
+            lilv_node_free(v);
+        }
+        LilvNodes* pns = lilv_world_find_nodes(world, gn, mg_port_pred, NULL);
+        if (pns) {
+            LILV_FOREACH(nodes, pi, pns) {
+                const LilvNode* pn = lilv_nodes_get(pns, pi);
+                LilvNode* iv = lilv_world_get(world, pn, lv2_idx_pred,  NULL);
+                LilvNode* sv = lilv_world_get(world, pn, lv2_sym_pred,  NULL);
+                LilvNode* nv = lilv_world_get(world, pn, lv2_name_pred, NULL);
+                if (sv) {
+                    ModguiCtrlEntry ce;
+                    ce.idx  = (iv && lilv_node_is_int(iv))
+                              ? lilv_node_as_int(iv) : 9999;
+                    ce.sym  = g_strdup(lilv_node_as_string(sv));
+                    ce.name = g_strdup(nv ? lilv_node_as_string(nv)
+                                          : lilv_node_as_string(sv));
+                    g_array_append_val(ctrl_arr, ce);
+                }
+                if (iv) lilv_node_free(iv);
+                if (sv) lilv_node_free(sv);
+                if (nv) lilv_node_free(nv);
+            }
+            lilv_nodes_free(pns);
+        }
+    }
+    if (gui_ns) lilv_nodes_free(gui_ns);
+
+    g_array_sort(ctrl_arr, cmp_modgui_ctrl);
+    for (guint i = 0; i < ctrl_arr->len; i++) {
+        ModguiCtrlEntry* ce = &g_array_index(ctrl_arr, ModguiCtrlEntry, i);
+        gchar* js = json_escape_string(ce->sym);
+        gchar* jn = json_escape_string(ce->name);
+        if (!first_ctrl) g_string_append_c(controls, ',');
+        g_string_append_printf(controls, "{\"symbol\":%s,\"name\":%s}", js, jn);
+        first_ctrl = false;
+        g_free(js); g_free(jn);
+        g_free(ce->sym); g_free(ce->name);
+    }
+    g_array_free(ctrl_arr, TRUE);
+    g_string_append_c(controls, ']');
+
+    gchar* juri    = json_escape_string(plugin_uri);
+    gchar* jname   = json_escape_string(plugin_name);
+    gchar* jbrand  = json_escape_string(mg_brand_val);
+    gchar* jlabel  = json_escape_string(mg_label_val);
+    gchar* jcolor  = json_escape_string(mg_color_val);
+    gchar* jknob   = json_escape_string(mg_knob_val);
+    gchar* result  = g_strdup_printf(
+        "{"
+          "\"effect\":{"
+            "\"uri\":%s,\"name\":%s,"
+            "\"ports\":{"
+              "\"audio\":{\"input\":%s,\"output\":%s},"
+              "\"midi\":{\"input\":%s,\"output\":%s},"
+              "\"control\":{\"input\":%s,\"output\":%s}"
+            "}"
+          "},"
+          "\"brand\":%s,"
+          "\"label\":%s,"
+          "\"color\":%s,"
+          "\"knob\":%s,"
+          "\"controls\":%s"
+        "}",
         juri, jname,
         audio_in->str, audio_out->str,
         midi_in->str,  midi_out->str,
-        ctrl_in->str,  ctrl_out->str);
+        ctrl_in->str,  ctrl_out->str,
+        jbrand, jlabel, jcolor, jknob,
+        controls->str);
 
-    g_free(juri); g_free(jname);
+    g_free(juri);  g_free(jname);
+    g_free(jbrand); g_free(jlabel); g_free(jcolor); g_free(jknob);
+    g_free(mg_brand_val); g_free(mg_label_val);
+    g_free(mg_color_val); g_free(mg_knob_val);
+    g_string_free(controls, TRUE);
     g_string_free(audio_in, TRUE); g_string_free(audio_out, TRUE);
     g_string_free(midi_in,  TRUE); g_string_free(midi_out,  TRUE);
     g_string_free(ctrl_in,  TRUE); g_string_free(ctrl_out,  TRUE);
@@ -525,6 +634,11 @@ static gchar* build_plugin_json(LilvWorld* world,
     lilv_node_free(atom_class);   lilv_node_free(supports_node);
     lilv_node_free(midi_event);   lilv_node_free(lv2_min);
     lilv_node_free(lv2_max);
+    lilv_node_free(mg_gui_pred);  lilv_node_free(mg_brand_pred);
+    lilv_node_free(mg_label_pred); lilv_node_free(mg_color_pred);
+    lilv_node_free(mg_knob_pred); lilv_node_free(mg_port_pred);
+    lilv_node_free(lv2_name_pred); lilv_node_free(lv2_sym_pred);
+    lilv_node_free(lv2_idx_pred);
 
     return result;
 }
@@ -548,9 +662,11 @@ static gchar* str_replace_all(const gchar* src,
 static gchar* preprocess_css(const gchar* css)
 {
     gchar* s1 = str_replace_all(css, "{{{ns}}}", "");
-    gchar* s2 = str_replace_all(s1, "url(/resources/", "url(");
+    gchar* s2 = str_replace_all(s1, "{{{cns}}}", "");
+    gchar* s3 = str_replace_all(s2, "url(/resources/", "url(");
     g_free(s1);
-    return s2;
+    g_free(s2);
+    return s3;
 }
 
 /* ── Load modgui into WebKit ─────────────────────────────────────────────── */

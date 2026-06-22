@@ -283,6 +283,8 @@ on_script_message(WebKitUserContentManager* mgr,
             value_v  && jsc_value_is_number(value_v)) {
             char*  sym = jsc_value_to_string(symbol_v);
             double dval = jsc_value_to_double(value_v);
+            lv2_log_note(&ui->logger,
+                         "modgui-host: parameterChange %s = %g\n", sym, dval);
             send_param_change(ui, sym, (float)dval);
             g_free(sym);
         }

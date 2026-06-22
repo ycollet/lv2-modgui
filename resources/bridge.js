@@ -128,6 +128,7 @@
   /* ── JS → C ──────────────────────────────────────────────────────────── */
 
   function sendParameterChange(symbol, value) {
+    console.log('modgui-bridge: sendParameterChange ' + symbol + '=' + value);
     if (window.webkit &&
         window.webkit.messageHandlers &&
         window.webkit.messageHandlers.lv2) {
@@ -145,11 +146,12 @@
     el.dataset.normalizedValue = norm;
     el.dataset.value           = value;
 
-    var knobImg = el.querySelector('.mod-knob-img, img');
-    if (knobImg) {
-      var angle = -150 + norm * 300;
-      knobImg.style.transform = 'rotate(' + angle + 'deg)';
-    }
+    /* Try a dedicated child image first; fall back to rotating el itself.
+       MOD knobs often use a CSS background-image directly on the control
+       element (e.g. class "mod-knob-image") with no separate <img> child. */
+    var knobImg = el.querySelector('.mod-knob-img, .mod-knob-image, img') || el;
+    var angle = -150 + norm * 300;
+    knobImg.style.transform = 'rotate(' + angle + 'deg)';
 
     var rangeInput = el.querySelector('input[type="range"]');
     if (rangeInput) rangeInput.value = value;
@@ -163,9 +165,18 @@
   /* ── Control initialisation ────────────────────────────────────────────── */
 
   function initControls() {
+    /* Diagnostic: log every click in the page to confirm events reach JS */
+    document.addEventListener('mousedown', function (e) {
+      console.log('modgui-bridge: mousedown target=' +
+                  (e.target.className || e.target.tagName) +
+                  ' role=' + (e.target.getAttribute('mod-role') || 'none'));
+    });
+
     /* Input control ports */
-    document.querySelectorAll('[mod-role="input-control-port"]')
-      .forEach(function (el) {
+    var controlEls = document.querySelectorAll('[mod-role="input-control-port"]');
+    console.log('modgui-bridge: initControls found ' + controlEls.length +
+                ' input-control-port elements');
+    controlEls.forEach(function (el) {
         var symbol = el.getAttribute('mod-port-symbol');
         if (!symbol) return;
 
@@ -177,6 +188,7 @@
         el.title = symbol;
 
         el.addEventListener('mousedown', function (e) {
+          console.log('modgui-bridge: mousedown on control ' + symbol);
           dragging  = true;
           startY    = e.clientY;
           startNorm = parseFloat(el.dataset.normalizedValue) || 0.0;

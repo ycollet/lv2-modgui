@@ -83,7 +83,7 @@
 <urn:modgui-host:ui>
     a ui:Gtk3UI ;
     lv2:requiredFeature urid:map ;
-    lv2:optionalFeature ui:noUserResize ;
+    lv2:optionalFeature ui:resize, ui:noUserResize ;
     ui:portNotification [
         ui:plugin <urn:modgui-host:plugin> ;
         lv2:symbol "events_out" ;

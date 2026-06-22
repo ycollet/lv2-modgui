@@ -85,6 +85,9 @@ typedef struct {
 
     /* Bridge JS path */
     char*               bridge_js_path;
+
+    /* Host resize API (optional — may be NULL) */
+    LV2UI_Resize*       resize;
 } ModguiHostUI;
 
 /* ── Forward declarations ────────────────────────────────────────────────── */
@@ -93,6 +96,8 @@ static void     free_plugin_info(PluginInfo* p);
 static void     on_load_plugin_clicked(GtkButton* btn, gpointer user_data);
 static void     on_row_activated(GtkTreeView* view, GtkTreePath* path,
                                   GtkTreeViewColumn* col, gpointer dialog_ptr);
+static void     on_page_load_changed(WebKitWebView* view,
+                                      WebKitLoadEvent event, gpointer user_data);
 static void     load_modgui(ModguiHostUI* ui, const PluginInfo* p);
 static void     send_hosted_uri(ModguiHostUI* ui, const char* uri);
 static void     send_param_change(ModguiHostUI* ui,
@@ -298,8 +303,25 @@ on_script_message(WebKitUserContentManager* mgr,
             jsc_value_is_number(w_v) && jsc_value_is_number(h_v)) {
             gint w = (gint)jsc_value_to_double(w_v);
             gint h = (gint)jsc_value_to_double(h_v);
-            if (w > 0 && h > 0)
+            if (w > 0 && h > 0) {
+                /* Compute header-bar + separator chrome from current layout */
+                gint root_h = gtk_widget_get_allocated_height(ui->root);
+                gint web_h  = gtk_widget_get_allocated_height(ui->webview);
+                gint chrome = (root_h > web_h && web_h > 0)
+                              ? (root_h - web_h) : 42;
+
+                /* Stop the webview from expanding beyond content */
+                gtk_widget_set_hexpand(ui->webview, FALSE);
+                gtk_widget_set_vexpand(ui->webview, FALSE);
                 gtk_widget_set_size_request(ui->webview, w, h);
+
+                /* Ask the host to resize the plugin window */
+                if (ui->resize)
+                    ui->resize->ui_resize(ui->resize->handle,
+                                          w, h + chrome);
+                else
+                    gtk_widget_set_size_request(ui->root, w, h + chrome);
+            }
         }
         if (w_v) g_object_unref(w_v);
         if (h_v) g_object_unref(h_v);
@@ -675,6 +697,18 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     g_free(base_uri);
 }
 
+/* ── WebKit load callback ────────────────────────────────────────────────── */
+
+static void on_page_load_changed(WebKitWebView* view, WebKitLoadEvent event,
+                                   gpointer user_data)
+{
+    (void)user_data;
+    /* Grab GTK focus so WebKit receives keyboard/pointer events when embedded
+     * in a host like Carla that may not automatically focus the plugin view. */
+    if (event == WEBKIT_LOAD_FINISHED)
+        gtk_widget_grab_focus(GTK_WIDGET(view));
+}
+
 /* ── Plugin picker dialog ─────────────────────────────────────────────────── */
 
 static void on_row_activated(GtkTreeView* view, GtkTreePath* path,
@@ -840,6 +874,14 @@ instantiate(const LV2UI_Descriptor*   descriptor,
 
     lv2_atom_forge_init(&ui->forge, map);
 
+    /* Optional: host resize API (lets us request window size changes) */
+    for (const LV2_Feature* const* f = features; *f; ++f) {
+        if (strcmp((*f)->URI, LV2_UI__resize) == 0) {
+            ui->resize = (LV2UI_Resize*)(*f)->data;
+            break;
+        }
+    }
+
     /* Bridge JS path: <bundle>/resources/bridge.js */
     ui->bridge_js_path =
         g_build_filename(bundle_path, "resources", "bridge.js", NULL);
@@ -853,7 +895,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     /* Do NOT call gtk_init here — the host (Carla) already owns GTK init. */
 
     ui->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(ui->root, 800, 600);
+    gtk_widget_set_size_request(ui->root, 400, 200);
 
     /* Header bar */
     ui->header_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -908,6 +950,16 @@ instantiate(const LV2UI_Descriptor*   descriptor,
 
     gtk_widget_set_hexpand(ui->webview, TRUE);
     gtk_widget_set_vexpand(ui->webview, TRUE);
+
+    /* Ensure WebKit can receive focus in embedded hosts (e.g. Carla).
+     * Without explicit focus the widget may not deliver mouse events to JS. */
+    gtk_widget_set_can_focus(ui->webview, TRUE);
+    gtk_widget_add_events(ui->webview,
+        GDK_BUTTON_PRESS_MASK   | GDK_BUTTON_RELEASE_MASK |
+        GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK         |
+        GDK_KEY_PRESS_MASK      | GDK_FOCUS_CHANGE_MASK);
+    g_signal_connect(ui->webview, "load-changed",
+                     G_CALLBACK(on_page_load_changed), ui);
 
     /* Load placeholder page */
     webkit_web_view_load_html(

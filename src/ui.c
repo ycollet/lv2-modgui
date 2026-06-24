@@ -418,6 +418,7 @@ static gchar* build_plugin_json(LilvWorld* world,
     LilvNode* midi_event    = lilv_new_uri(world, LV2_MIDI__MidiEvent);
     LilvNode* lv2_min       = lilv_new_uri(world, LV2_CORE__minimum);
     LilvNode* lv2_max       = lilv_new_uri(world, LV2_CORE__maximum);
+    LilvNode* lv2_int_prop  = lilv_new_uri(world, LV2_CORE__integer);
     /* modgui namespace — brand/label/color/knob/port */
 #define MODGUI_NS "http://moddevices.com/ns/modgui#"
     LilvNode* mg_gui_pred   = lilv_new_uri(world, MODGUI_NS "gui");
@@ -489,14 +490,19 @@ static gchar* build_plugin_json(LilvWorld* world,
 
             LilvNode* mn = lilv_port_get(lp, port, lv2_min);
             LilvNode* mx = lilv_port_get(lp, port, lv2_max);
-            float min_v = (mn && lilv_node_is_float(mn))
-                          ? lilv_node_as_float(mn) : 0.0f;
-            float max_v = (mx && lilv_node_is_float(mx))
-                          ? lilv_node_as_float(mx) : 1.0f;
+            /* Accept both xsd:float and xsd:integer TTL literals */
+#define NODE_AS_FLOAT(n, fallback) \
+    ((n) ? (lilv_node_is_float(n) ? lilv_node_as_float(n) \
+          : lilv_node_is_int(n)   ? (float)lilv_node_as_int(n) \
+                                  : (fallback)) : (fallback))
+            float min_v = NODE_AS_FLOAT(mn, 0.0f);
+            float max_v = NODE_AS_FLOAT(mx, 1.0f);
+#undef NODE_AS_FLOAT
             /* Sanitise: nan/inf are not valid JSON/JS tokens */
             if (!isfinite(min_v)) min_v = 0.0f;
             if (!isfinite(max_v)) max_v = 1.0f;
             float def_v = isfinite(defaults[i]) ? defaults[i] : min_v;
+            bool  is_int_port = lilv_port_has_property(lp, port, lv2_int_prop);
             lilv_node_free(mn);
             lilv_node_free(mx);
 
@@ -504,9 +510,10 @@ static gchar* build_plugin_json(LilvWorld* world,
             g_string_append_printf(arr,
                 "{\"index\":%u,\"symbol\":%s,\"name\":%s,"
                 "\"minimum\":%.6g,\"maximum\":%.6g,\"default\":%.6g,"
-                "\"value\":%.6g}",
+                "\"value\":%.6g,\"integer\":%s}",
                 i, jsym, jname,
-                (double)min_v, (double)max_v, (double)def_v, (double)def_v);
+                (double)min_v, (double)max_v, (double)def_v, (double)def_v,
+                is_int_port ? "true" : "false");
         }
 
         if (fi >= 0) first[fi] = false;
@@ -633,7 +640,7 @@ static gchar* build_plugin_json(LilvWorld* world,
     lilv_node_free(input_class);  lilv_node_free(output_class);
     lilv_node_free(atom_class);   lilv_node_free(supports_node);
     lilv_node_free(midi_event);   lilv_node_free(lv2_min);
-    lilv_node_free(lv2_max);
+    lilv_node_free(lv2_max);      lilv_node_free(lv2_int_prop);
     lilv_node_free(mg_gui_pred);  lilv_node_free(mg_brand_pred);
     lilv_node_free(mg_label_pred); lilv_node_free(mg_color_pred);
     lilv_node_free(mg_knob_pred); lilv_node_free(mg_port_pred);

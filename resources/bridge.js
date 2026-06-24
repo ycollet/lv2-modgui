@@ -96,10 +96,11 @@
     var ports = (ctrl.input || []).concat(ctrl.output || []);
     ports.forEach(function (p) {
       portInfo[p.symbol] = {
-        min: p.minimum !== undefined ? p.minimum : 0,
-        max: p.maximum !== undefined ? p.maximum : 1,
-        def: p['default'] !== undefined ? p['default'] : 0,
-        value: p.value !== undefined ? p.value : (p['default'] || 0),
+        min:     p.minimum !== undefined  ? p.minimum  : 0,
+        max:     p.maximum !== undefined  ? p.maximum  : 1,
+        def:     p['default'] !== undefined ? p['default'] : 0,
+        value:   p.value !== undefined    ? p.value    : (p['default'] || 0),
+        integer: p.integer || false,
       };
     });
   }
@@ -125,6 +126,26 @@
       window.widget.parameterChanged(symbol, value);
   };
 
+  /* ── MOD compatibility: window.control API ───────────────────────────── */
+
+  /* Some plugin GUIs call window.control.setPortValue() to send parameter
+     changes. Provide a minimal shim so those button handlers work. */
+  window.control = {
+    setPortValue: function (symbol, value) {
+      var port = portInfo[symbol] || { min: 0, max: 1, def: 0, integer: false };
+      var norm = port.max !== port.min
+        ? (value - port.min) / (port.max - port.min) : 0.0;
+      norm = Math.max(0.0, Math.min(1.0, norm));
+      document.querySelectorAll('[mod-port-symbol="' + symbol + '"]')
+        .forEach(function (el) { updateControlVisual(el, norm, value, port); });
+      sendParameterChange(symbol, value);
+    },
+    getPortValue: function (symbol) {
+      var port = portInfo[symbol];
+      return port ? parseFloat(port.value) : 0;
+    },
+  };
+
   /* ── JS → C ──────────────────────────────────────────────────────────── */
 
   function sendParameterChange(symbol, value) {
@@ -147,15 +168,42 @@
     el.dataset.value           = value;
 
     /* Rotate a child knob image if present. Fall back to rotating el itself
-       only for boxy-style round knobs: those set modgui:knob (e.g. "silver").
-       Sprite-sheet / slider controls (like GxCapo) have no knob material set
-       and must not be rotated — their image is a linear strip, not a disc. */
+       only for boxy-style round knobs (modgui:knob is set, e.g. "silver").
+       Sprite-sheet / slider controls have no knob material — animate via
+       background-position instead of rotation. */
     var knobImg = el.querySelector('.mod-knob-img, .mod-knob-image, img');
     if (!knobImg && window.__MOD_DATA__ && window.__MOD_DATA__.knob)
       knobImg = el;
     if (knobImg) {
       var angle = -150 + norm * 300;
       knobImg.style.transform = 'rotate(' + angle + 'deg)';
+    } else {
+      /* Sprite strip: advance background-position-y by frame index.
+         Frame count is determined lazily from the image's naturalHeight. */
+      var bgStyle = window.getComputedStyle(el).backgroundImage;
+      if (bgStyle && bgStyle !== 'none') {
+        var m = bgStyle.match(/url\(["']?([^"')]+)["']?\)/);
+        var frameH = el.clientHeight;
+        if (m && frameH > 0) {
+          if (el._spriteFrames) {
+            var frame = Math.round(norm * (el._spriteFrames - 1));
+            el.style.backgroundPositionY = (-frame * frameH) + 'px';
+          } else if (!el._spriteLoading) {
+            el._spriteLoading = true;
+            (function (n) {
+              var img = new Image();
+              img.onload = function () {
+                el._spriteFrames = Math.max(1, Math.round(img.naturalHeight / frameH));
+                el._spriteLoading = false;
+                var frame = Math.round(n * (el._spriteFrames - 1));
+                el.style.backgroundPositionY = (-frame * frameH) + 'px';
+              };
+              img.onerror = function () { el._spriteLoading = false; };
+              img.src = m[1];
+            })(norm);
+          }
+        }
+      }
     }
 
     var rangeInput = el.querySelector('input[type="range"]');
@@ -178,9 +226,13 @@
         var symbol = el.getAttribute('mod-port-symbol');
         if (!symbol) return;
 
-        var port = portInfo[symbol] || { min: 0.0, max: 1.0, def: 0.0 };
+        var port = portInfo[symbol] || { min: 0.0, max: 1.0, def: 0.0, integer: false };
         var startY, startNorm;
         var dragging = false;
+        var moved    = false;
+
+        /* Binary toggle: integer port with exactly a 1-unit range (e.g. on/off) */
+        var isButton = port.integer && (port.max - port.min) === 1;
 
         el.style.cursor = 'ns-resize';
         el.title = symbol;
@@ -190,44 +242,48 @@
           dragging  = true;
           startY    = e.clientY;
           startNorm = parseFloat(el.dataset.normalizedValue) || 0.0;
+          moved     = false;
           e.preventDefault();
         });
 
         document.addEventListener('mousemove', function (e) {
           if (!dragging) return;
+          if (Math.abs(startY - e.clientY) > 4) moved = true;
           var delta   = (startY - e.clientY) / 200.0;
           var newNorm = Math.max(0.0, Math.min(1.0, startNorm + delta));
           var value   = port.min + newNorm * (port.max - port.min);
+          if (port.integer) value = Math.round(value);
           updateControlVisual(el, newNorm, value, port);
           sendParameterChange(symbol, value);
         });
 
-        document.addEventListener('mouseup', function () { dragging = false; });
+        /* WebKit suppresses 'click' after e.preventDefault() on mousedown, so
+           detect a tap (no significant movement) inside the mouseup handler. */
+        document.addEventListener('mouseup', function () {
+          if (dragging && isButton && !moved) {
+            var cur     = parseFloat(el.dataset.value);
+            var toggled = cur >= port.max ? port.min : port.max;
+            var tn      = port.max !== port.min
+              ? (toggled - port.min) / (port.max - port.min) : 0.0;
+            updateControlVisual(el, tn, toggled, port);
+            sendParameterChange(symbol, toggled);
+          }
+          dragging = false;
+        });
 
         el.addEventListener('wheel', function (e) {
           e.preventDefault();
-          var delta = (e.deltaY < 0 ? 1 : -1) * 0.02;
+          /* For integer ports: one wheel tick = one discrete step */
+          var step = port.integer && port.max > port.min
+            ? 1.0 / (port.max - port.min) : 0.02;
+          var delta = (e.deltaY < 0 ? 1 : -1) * step;
           var cur   = parseFloat(el.dataset.normalizedValue) || 0.0;
           var norm  = Math.max(0.0, Math.min(1.0, cur + delta));
           var value = port.min + norm * (port.max - port.min);
+          if (port.integer) value = Math.round(value);
           updateControlVisual(el, norm, value, port);
           sendParameterChange(symbol, value);
         }, { passive: false });
-
-        /* For boolean / integer controls with range [0,1] or similar small
-           ranges, a plain click should toggle between min and max so push
-           buttons work without requiring a drag gesture. */
-        var isButton = Number.isInteger(port.min) && Number.isInteger(port.max)
-                       && (port.max - port.min) === 1;
-        if (isButton) {
-          el.addEventListener('click', function (e) {
-            var cur     = parseFloat(el.dataset.value);
-            var toggled = cur >= port.max ? port.min : port.max;
-            var tn      = (toggled - port.min) / (port.max - port.min);
-            updateControlVisual(el, tn, toggled, port);
-            sendParameterChange(symbol, toggled);
-          });
-        }
 
         el.addEventListener('dblclick', function () {
           var defVal = port.def !== undefined ? port.def : port.min;
@@ -255,11 +311,15 @@
         });
       });
 
-    /* Bypass toggle */
+    /* Bypass toggle — also sync any bypass-light indicator elements */
     document.querySelectorAll('[mod-role="bypass"]').forEach(function (el) {
       el.addEventListener('click', function () {
         var active = el.classList.toggle('mod-active');
         sendParameterChange(':bypass', active ? 0.0 : 1.0);
+        document.querySelectorAll('[mod-role="bypass-light"]').forEach(function (light) {
+          light.classList.toggle('on',  active);
+          light.classList.toggle('off', !active);
+        });
       });
     });
 

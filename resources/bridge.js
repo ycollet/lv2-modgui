@@ -178,29 +178,48 @@
       var angle = -150 + norm * 300;
       knobImg.style.transform = 'rotate(' + angle + 'deg)';
     } else {
-      /* Sprite strip: advance background-position-y by frame index.
-         Frame count is determined lazily from the image's naturalHeight. */
+      /* Sprite strip: advance background-position by frame index.
+         Orientation (X=horizontal, Y=vertical) and frame count are determined
+         lazily from the image's natural dimensions vs the element's client size.
+         Whichever axis has more frames wins. */
       var bgStyle = window.getComputedStyle(el).backgroundImage;
       if (bgStyle && bgStyle !== 'none') {
         var m = bgStyle.match(/url\(["']?([^"')]+)["']?\)/);
         var frameH = el.clientHeight;
-        if (m && frameH > 0) {
+        var frameW = el.clientWidth;
+        if (m && (frameH > 0 || frameW > 0)) {
           if (el._spriteFrames) {
             var frame = Math.round(norm * (el._spriteFrames - 1));
-            el.style.backgroundPositionY = (-frame * frameH) + 'px';
+            if (el._spriteAxis === 'x') {
+              el.style.backgroundPositionX = (-frame * frameW) + 'px';
+            } else {
+              el.style.backgroundPositionY = (-frame * frameH) + 'px';
+            }
           } else if (!el._spriteLoading) {
             el._spriteLoading = true;
-            (function (n) {
+            (function (n, fh, fw) {
               var img = new Image();
               img.onload = function () {
-                el._spriteFrames = Math.max(1, Math.round(img.naturalHeight / frameH));
+                var vf = fh > 0 ? Math.max(1, Math.round(img.naturalHeight / fh)) : 1;
+                var hf = fw > 0 ? Math.max(1, Math.round(img.naturalWidth  / fw)) : 1;
+                if (hf > vf) {
+                  el._spriteFrames = hf;
+                  el._spriteAxis   = 'x';
+                } else {
+                  el._spriteFrames = vf;
+                  el._spriteAxis   = 'y';
+                }
                 el._spriteLoading = false;
                 var frame = Math.round(n * (el._spriteFrames - 1));
-                el.style.backgroundPositionY = (-frame * frameH) + 'px';
+                if (el._spriteAxis === 'x') {
+                  el.style.backgroundPositionX = (-frame * fw) + 'px';
+                } else {
+                  el.style.backgroundPositionY = (-frame * fh) + 'px';
+                }
               };
               img.onerror = function () { el._spriteLoading = false; };
               img.src = m[1];
-            })(norm);
+            })(norm, frameH, frameW);
           }
         }
       }
@@ -227,9 +246,8 @@
         if (!symbol) return;
 
         var port = portInfo[symbol] || { min: 0.0, max: 1.0, def: 0.0, integer: false };
-        var startY, startNorm;
+        var startX, startY, startNorm;
         var dragging = false;
-        var moved    = false;
 
         /* Binary toggle: integer port with exactly a 1-unit range (e.g. on/off) */
         var isButton = port.integer && (port.max - port.min) === 1;
@@ -240,16 +258,18 @@
         el.addEventListener('mousedown', function (e) {
           console.log('modgui-bridge: mousedown on control ' + symbol);
           dragging  = true;
+          startX    = e.clientX;
           startY    = e.clientY;
           startNorm = parseFloat(el.dataset.normalizedValue) || 0.0;
-          moved     = false;
           e.preventDefault();
         });
 
         document.addEventListener('mousemove', function (e) {
           if (!dragging) return;
-          if (Math.abs(startY - e.clientY) > 4) moved = true;
-          var delta   = (startY - e.clientY) / 200.0;
+          var dy = startY - e.clientY;
+          var dx = e.clientX - startX;
+          /* Use dominant axis: Y for vertical knobs, X for horizontal faders */
+          var delta   = Math.abs(dy) >= Math.abs(dx) ? dy / 200.0 : dx / 200.0;
           var newNorm = Math.max(0.0, Math.min(1.0, startNorm + delta));
           var value   = port.min + newNorm * (port.max - port.min);
           if (port.integer) value = Math.round(value);
@@ -257,16 +277,21 @@
           sendParameterChange(symbol, value);
         });
 
-        /* WebKit suppresses 'click' after e.preventDefault() on mousedown, so
-           detect a tap (no significant movement) inside the mouseup handler. */
+        /* WebKit suppresses 'click' after e.preventDefault() on mousedown.
+           For binary toggles: fire the toggle on mouseup if the drag didn't
+           produce a value change (handles both clean taps and small drags that
+           round back to the starting value). */
         document.addEventListener('mouseup', function () {
-          if (dragging && isButton && !moved) {
-            var cur     = parseFloat(el.dataset.value);
-            var toggled = cur >= port.max ? port.min : port.max;
-            var tn      = port.max !== port.min
-              ? (toggled - port.min) / (port.max - port.min) : 0.0;
-            updateControlVisual(el, tn, toggled, port);
-            sendParameterChange(symbol, toggled);
+          if (dragging && isButton) {
+            var cur      = parseFloat(el.dataset.value);
+            var startVal = Math.round(port.min + startNorm * (port.max - port.min));
+            if (cur === startVal) {
+              var toggled = startVal >= port.max ? port.min : port.max;
+              var tn      = port.max !== port.min
+                ? (toggled - port.min) / (port.max - port.min) : 0.0;
+              updateControlVisual(el, tn, toggled, port);
+              sendParameterChange(symbol, toggled);
+            }
           }
           dragging = false;
         });
@@ -379,16 +404,22 @@
     createWidget();
     initControls();
 
-    /* Report rendered content size so the host can resize the view */
+    /* Report rendered content size so the host can resize the view.
+       Double-rAF ensures CSS layout has settled before measuring.
+       getBoundingClientRect captures elements sized purely by CSS (e.g. absolute
+       children that don't contribute to scrollWidth). */
     if (window.webkit &&
         window.webkit.messageHandlers &&
         window.webkit.messageHandlers.lv2) {
       requestAnimationFrame(function () {
-        var root = document.querySelector('.mod-pedal') || document.body;
-        window.webkit.messageHandlers.lv2.postMessage({
-          type:   'contentReady',
-          width:  root.scrollWidth  || root.offsetWidth  || 0,
-          height: root.scrollHeight || root.offsetHeight || 0,
+        requestAnimationFrame(function () {
+          var root = document.querySelector('.mod-pedal') || document.body;
+          var rect = root.getBoundingClientRect();
+          var w = rect.width  || root.scrollWidth  || root.offsetWidth  || 0;
+          var h = rect.height || root.scrollHeight || root.offsetHeight || 0;
+          window.webkit.messageHandlers.lv2.postMessage({
+            type: 'contentReady', width: w, height: h,
+          });
         });
       });
     }

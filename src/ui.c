@@ -52,6 +52,7 @@ typedef struct {
         LV2_URID atom_Float;
         LV2_URID atom_Sequence;
         LV2_URID atom_event_transfer;
+        LV2_URID patch_Get;
         LV2_URID patch_Set;
         LV2_URID patch_property;
         LV2_URID patch_value;
@@ -327,6 +328,22 @@ cleanup:
 }
 
 /* ── Atom helpers ────────────────────────────────────────────────────────── */
+
+/* Ask the DSP for its current state (hosted plugin URI).
+   Sent on UI open so that when the UI is reopened the DSP echoes the
+   URI back via port_event and the plugin is automatically reloaded. */
+static void request_state(ModguiHostUI* ui)
+{
+    lv2_atom_forge_set_buffer(&ui->forge, ui->forge_buf, sizeof(ui->forge_buf));
+    LV2_Atom_Forge_Frame frame;
+    lv2_atom_forge_object(&ui->forge, &frame, 0, ui->urid.patch_Get);
+    lv2_atom_forge_pop(&ui->forge, &frame);
+    LV2_Atom* atom = (LV2_Atom*)ui->forge_buf;
+    ui->write_function(ui->controller, PORT_EVENTS_IN,
+                       lv2_atom_total_size(atom),
+                       ui->urid.atom_event_transfer,
+                       atom);
+}
 
 static void send_hosted_uri(ModguiHostUI* ui, const char* uri)
 {
@@ -978,6 +995,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     ui->urid.atom_Sequence     = map->map(map->handle, LV2_ATOM__Sequence);
     ui->urid.atom_event_transfer =
         map->map(map->handle, LV2_ATOM__eventTransfer);
+    ui->urid.patch_Get         = map->map(map->handle, LV2_PATCH__Get);
     ui->urid.patch_Set         = map->map(map->handle, LV2_PATCH__Set);
     ui->urid.patch_property    = map->map(map->handle, LV2_PATCH__property);
     ui->urid.patch_value       = map->map(map->handle, LV2_PATCH__value);
@@ -1091,6 +1109,10 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     gtk_box_pack_start(GTK_BOX(ui->root), ui->webview, TRUE, TRUE, 0);
 
     gtk_widget_show_all(ui->root);
+
+    /* Ask DSP for its current hosted plugin URI so that if the UI is reopened
+       after a previous session the plugin is automatically reloaded. */
+    request_state(ui);
 
     *widget = (LV2UI_Widget)ui->root;
     return (LV2UI_Handle)ui;

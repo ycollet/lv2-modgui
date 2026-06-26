@@ -59,6 +59,7 @@ typedef struct {
         LV2_URID atom_URID;
         LV2_URID atom_Sequence;
         LV2_URID atom_event_transfer;
+        LV2_URID patch_Get;
         LV2_URID patch_Set;
         LV2_URID patch_property;
         LV2_URID patch_value;
@@ -149,6 +150,7 @@ instantiate(const LV2_Descriptor*     descriptor,
     plugin->urid.atom_Sequence     = map->map(map->handle, LV2_ATOM__Sequence);
     plugin->urid.atom_event_transfer =
         map->map(map->handle, LV2_ATOM__eventTransfer);
+    plugin->urid.patch_Get         = map->map(map->handle, LV2_PATCH__Get);
     plugin->urid.patch_Set         = map->map(map->handle, LV2_PATCH__Set);
     plugin->urid.patch_property    = map->map(map->handle, LV2_PATCH__property);
     plugin->urid.patch_value       = map->map(map->handle, LV2_PATCH__value);
@@ -267,6 +269,13 @@ static void run(LV2_Handle instance, uint32_t n_samples)
                         plugin->schedule->handle,
                         strlen(uri) + 1, uri);
                 }
+                continue;
+            }
+
+            /* patch:Get — UI requesting current state (e.g. on reopen) */
+            if (obj->body.otype == plugin->urid.patch_Get) {
+                if (plugin->hosted_plugin_uri)
+                    plugin->send_uri_to_ui = true;
                 continue;
             }
 

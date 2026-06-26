@@ -225,6 +225,15 @@
       }
     }
 
+    /* For binary toggles sync the common CSS class names used by modgui
+       push-button themes so the visual always matches the internal value. */
+    if (port && port.integer && (port.max - port.min) === 1) {
+      var isOn = norm >= 0.5;
+      el.classList.toggle('on',     isOn);
+      el.classList.toggle('off',   !isOn);
+      el.classList.toggle('active', isOn);
+    }
+
     var rangeInput = el.querySelector('input[type="range"]');
     if (rangeInput) rangeInput.value = value;
 

@@ -798,12 +798,15 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     }
 
     /* 4. Global overrides: disable the MOD drag-handle overlay so it never
-     *    swallows pointer events, and strip default body margin/scroll. */
+     *    swallows pointer events, strip default body margin/scroll, and anchor
+     *    the pedal background to the top so it doesn't drift when element height
+     *    or content overflow causes `background-position:center` to shift. */
     g_string_append(page,
         "<style>"
         "[mod-role=\"drag-handle\"],.mod-drag-handle"
             "{pointer-events:none!important}"
         "body{margin:0;padding:0;overflow:hidden}"
+        ".mod-pedal{background-position:top center}"
         "</style>");
 
     g_string_append(page, "</head><body>");

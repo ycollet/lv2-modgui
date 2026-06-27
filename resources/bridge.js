@@ -345,8 +345,11 @@
         });
       });
 
-    /* Bypass toggle — also sync any bypass-light indicator elements */
+    /* Bypass toggle — also sync any bypass-light indicator elements.
+       Plugins start active (bypass=0), so mark the bypass element active now
+       so the first click correctly sends bypass=1 (off) rather than bypass=0. */
     document.querySelectorAll('[mod-role="bypass"]').forEach(function (el) {
+      el.classList.add('mod-active');
       el.addEventListener('click', function () {
         var active = el.classList.toggle('mod-active');
         sendParameterChange(':bypass', active ? 0.0 : 1.0);

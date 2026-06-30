@@ -798,15 +798,20 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     }
 
     /* 4. Global overrides: disable the MOD drag-handle overlay so it never
-     *    swallows pointer events, strip default body margin/scroll, and anchor
-     *    the pedal background to the top so it doesn't drift when element height
-     *    or content overflow causes `background-position:center` to shift. */
+     *    swallows pointer events, strip default body margin/scroll, and fix
+     *    the pedal background.  overflow:hidden on .mod-pedal creates a BFC
+     *    which prevents the first in-flow child's top margin from collapsing
+     *    through to the parent — without it, plugins that position control
+     *    groups via margin-top (e.g. GxHarmonizer) place them at y=0 inside
+     *    the pedal instead of the intended offset, misaligning knobs with the
+     *    background image.  background-position:top anchors the image when
+     *    overflow content would otherwise drift a centered background. */
     g_string_append(page,
         "<style>"
         "[mod-role=\"drag-handle\"],.mod-drag-handle"
             "{pointer-events:none!important}"
         "body{margin:0;padding:0;overflow:hidden}"
-        ".mod-pedal{background-position:top center}"
+        ".mod-pedal{background-position:top center;overflow:hidden}"
         "</style>");
 
     g_string_append(page, "</head><body>");

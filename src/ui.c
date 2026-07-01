@@ -308,12 +308,25 @@ on_script_message(WebKitUserContentManager* mgr,
                 gtk_widget_set_vexpand(ui->webview, FALSE);
                 gtk_widget_set_size_request(ui->webview, w, h);
 
+                /* Lower the root's minimum size before resizing — otherwise
+                 * the old minimum (e.g. 400px wide) prevents the window from
+                 * shrinking to the plugin's actual width. */
+                gtk_widget_set_size_request(ui->root, w, h + chrome);
+
                 /* Ask the host to resize the plugin window */
-                if (ui->resize)
+                if (ui->resize) {
                     ui->resize->ui_resize(ui->resize->handle,
                                           w, h + chrome);
-                else
-                    gtk_widget_set_size_request(ui->root, w, h + chrome);
+                } else {
+                    /* set_size_request only sets a minimum — it cannot shrink
+                     * a window that is already wider than the new minimum.
+                     * Force the actual window size with gtk_window_resize. */
+                    GtkWidget* toplevel =
+                        gtk_widget_get_toplevel(ui->root);
+                    if (GTK_IS_WINDOW(toplevel))
+                        gtk_window_resize(GTK_WINDOW(toplevel),
+                                          w, h + chrome);
+                }
             }
         }
         if (w_v) g_object_unref(w_v);

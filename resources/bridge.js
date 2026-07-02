@@ -429,6 +429,12 @@
           var rect = root.getBoundingClientRect();
           var w = rect.width  || root.scrollWidth  || root.offsetWidth  || 0;
           var h = rect.height || root.scrollHeight || root.offsetHeight || 0;
+          console.log('[modgui] contentReady root=' + root.className +
+                      ' rect.w=' + rect.width + ' rect.h=' + rect.height +
+                      ' scroll=' + root.scrollWidth + 'x' + root.scrollHeight +
+                      ' offset=' + root.offsetWidth + 'x' + root.offsetHeight +
+                      ' viewport=' + window.innerWidth + 'x' + window.innerHeight +
+                      ' => w=' + w + ' h=' + h);
           window.webkit.messageHandlers.lv2.postMessage({
             type: 'contentReady', width: w, height: h,
           });

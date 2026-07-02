@@ -296,6 +296,8 @@ on_script_message(WebKitUserContentManager* mgr,
             jsc_value_is_number(w_v) && jsc_value_is_number(h_v)) {
             gint w = (gint)jsc_value_to_double(w_v);
             gint h = (gint)jsc_value_to_double(h_v);
+            lv2_log_note(&ui->logger,
+                         "modgui-host: contentReady w=%d h=%d\n", w, h);
             if (w > 0 && h > 0) {
                 /* Compute header-bar + separator chrome from current layout */
                 gint root_h = gtk_widget_get_allocated_height(ui->root);
@@ -315,6 +317,9 @@ on_script_message(WebKitUserContentManager* mgr,
 
                 /* Ask the host to resize the plugin window */
                 if (ui->resize) {
+                    lv2_log_note(&ui->logger,
+                                 "modgui-host: ui_resize(%d, %d)\n",
+                                 w, h + chrome);
                     ui->resize->ui_resize(ui->resize->handle,
                                           w, h + chrome);
                 } else {
@@ -323,6 +328,10 @@ on_script_message(WebKitUserContentManager* mgr,
                      * Force the actual window size with gtk_window_resize. */
                     GtkWidget* toplevel =
                         gtk_widget_get_toplevel(ui->root);
+                    lv2_log_note(&ui->logger,
+                                 "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
+                                 w, h + chrome,
+                                 GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
                     if (GTK_IS_WINDOW(toplevel))
                         gtk_window_resize(GTK_WINDOW(toplevel),
                                           w, h + chrome);

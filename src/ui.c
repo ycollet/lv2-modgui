@@ -315,25 +315,27 @@ on_script_message(WebKitUserContentManager* mgr,
                  * shrinking to the plugin's actual width. */
                 gtk_widget_set_size_request(ui->root, w, h + chrome);
 
-                /* Ask the host to resize the plugin window */
+                /* Directly resize the GTK toplevel window.  This is the
+                 * only reliable path when Carla runs our UI via its
+                 * carla-bridge-lv2-gtk3 subprocess: in that case the
+                 * bridge's window is a standalone GtkWindow on the desktop,
+                 * and ui_resize() only notifies Carla — it does not resize
+                 * the bridge window itself.  set_size_request() cannot shrink
+                 * a window that is already wider than the new minimum. */
+                GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
+                lv2_log_note(&ui->logger,
+                             "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
+                             w, h + chrome,
+                             GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
+                if (GTK_IS_WINDOW(toplevel))
+                    gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
+
+                /* Also notify the host so it can update its own bookkeeping */
                 if (ui->resize) {
                     lv2_log_note(&ui->logger,
                                  "modgui-host: ui_resize(%d, %d)\n",
                                  w, h + chrome);
                     ui->resize->ui_resize(ui->resize->handle,
-                                          w, h + chrome);
-                } else {
-                    /* set_size_request only sets a minimum — it cannot shrink
-                     * a window that is already wider than the new minimum.
-                     * Force the actual window size with gtk_window_resize. */
-                    GtkWidget* toplevel =
-                        gtk_widget_get_toplevel(ui->root);
-                    lv2_log_note(&ui->logger,
-                                 "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
-                                 w, h + chrome,
-                                 GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
-                    if (GTK_IS_WINDOW(toplevel))
-                        gtk_window_resize(GTK_WINDOW(toplevel),
                                           w, h + chrome);
                 }
             }

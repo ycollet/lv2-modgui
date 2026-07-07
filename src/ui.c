@@ -315,22 +315,9 @@ on_script_message(WebKitUserContentManager* mgr,
                  * shrinking to the plugin's actual width. */
                 gtk_widget_set_size_request(ui->root, w, h + chrome);
 
-                /* Directly resize the GTK toplevel window.  This is the
-                 * only reliable path when Carla runs our UI via its
-                 * carla-bridge-lv2-gtk3 subprocess: in that case the
-                 * bridge's window is a standalone GtkWindow on the desktop,
-                 * and ui_resize() only notifies Carla — it does not resize
-                 * the bridge window itself.  set_size_request() cannot shrink
-                 * a window that is already wider than the new minimum. */
-                GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
-                lv2_log_note(&ui->logger,
-                             "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
-                             w, h + chrome,
-                             GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
-                if (GTK_IS_WINDOW(toplevel))
-                    gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
-
-                /* Also notify the host so it can update its own bookkeeping */
+                /* Notify the host first — Carla's bridge handler runs
+                 * synchronously and calls gtk_window_resize internally,
+                 * but it may only adjust height (keeping its own width). */
                 if (ui->resize) {
                     lv2_log_note(&ui->logger,
                                  "modgui-host: ui_resize(%d, %d)\n",
@@ -338,6 +325,20 @@ on_script_message(WebKitUserContentManager* mgr,
                     ui->resize->ui_resize(ui->resize->handle,
                                           w, h + chrome);
                 }
+
+                /* After ui_resize, force the exact window size directly.
+                 * This overrides any width the bridge may have kept from its
+                 * own gtk_window_resize call inside ui_resize.  Doing this
+                 * AFTER ui_resize ensures we win the race: both resize
+                 * requests are synchronous on the GTK main thread and the
+                 * window manager processes them in order. */
+                GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
+                lv2_log_note(&ui->logger,
+                             "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
+                             w, h + chrome,
+                             GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
+                if (GTK_IS_WINDOW(toplevel))
+                    gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
             }
         }
         if (w_v) g_object_unref(w_v);

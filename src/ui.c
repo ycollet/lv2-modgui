@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "common.h"
 
@@ -108,12 +110,130 @@ static void     on_script_message(WebKitUserContentManager* mgr,
                                    gpointer user_data);
 static gboolean run_js(ModguiHostUI* ui, const char* script);
 
+/* ── Plugin list cache ───────────────────────────────────────────────────── */
+/* Scanning all LV2 bundles via lilv_world_load_all() is slow.  We cache the
+ * result in $XDG_CACHE_HOME/lv2-modgui/plugins.cache.  The cache is
+ * invalidated if any of the standard LV2 directories has been modified more
+ * recently than the cache file.
+ *
+ * Cache format: one plugin per line, six tab-separated fields:
+ *   name TAB uri TAB bundle_path TAB template_file TAB resources_dir TAB stylesheet
+ * Empty/NULL fields are stored as an empty string between tabs. */
+
+static const char* plugin_cache_path(void)
+{
+    static gchar path[4096];
+    if (!path[0])
+        g_snprintf(path, sizeof(path), "%s/lv2-modgui/plugins.cache",
+                   g_get_user_cache_dir());
+    return path;
+}
+
+static gboolean lv2_dirs_newer_than(time_t t)
+{
+    static const char* const std[] = {
+        "/usr/lib64/lv2", "/usr/lib/lv2",
+        "/usr/local/lib64/lv2", "/usr/local/lib/lv2",
+        NULL
+    };
+    struct stat st;
+    for (int i = 0; std[i]; i++)
+        if (stat(std[i], &st) == 0 && st.st_mtime > t) return TRUE;
+
+    gchar* u = g_build_filename(g_get_home_dir(), ".lv2", NULL);
+    gboolean newer = (stat(u, &st) == 0 && st.st_mtime > t);
+    g_free(u);
+    if (newer) return TRUE;
+
+    const char* env = g_getenv("LV2_PATH");
+    if (env) {
+        gchar** dirs = g_strsplit(env, ":", -1);
+        for (int i = 0; dirs[i]; i++)
+            if (stat(dirs[i], &st) == 0 && st.st_mtime > t) {
+                g_strfreev(dirs); return TRUE;
+            }
+        g_strfreev(dirs);
+    }
+    return FALSE;
+}
+
+static gboolean plugin_cache_valid(const char* path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && !lv2_dirs_newer_than(st.st_mtime);
+}
+
+static void save_plugin_cache(const char* path, PluginInfo* list, int n)
+{
+    gchar* dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+    g_free(dir);
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%s\t%s\t%s\t%s\t%s\t%s\n",
+                list[i].name          ? list[i].name          : "",
+                list[i].uri           ? list[i].uri           : "",
+                list[i].bundle_path   ? list[i].bundle_path   : "",
+                list[i].template_file ? list[i].template_file : "",
+                list[i].resources_dir ? list[i].resources_dir : "",
+                list[i].stylesheet    ? list[i].stylesheet    : "");
+    fclose(f);
+}
+
+static gboolean load_plugin_cache(const char* path,
+                                   PluginInfo** list_out, int* n_out)
+{
+    FILE* f = fopen(path, "r");
+    if (!f) return FALSE;
+    GArray* arr = g_array_new(FALSE, TRUE, sizeof(PluginInfo));
+    gchar line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        gsize len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+        if (!len) continue;
+        gchar** fld = g_strsplit(line, "\t", 6);
+        int nf = 0; while (fld[nf]) nf++;
+        if (nf < 6) { g_strfreev(fld); continue; }
+        PluginInfo p = {0};
+        /* name/uri freed with free() — use strdup to match discover_plugins */
+        p.name          = fld[0][0] ? strdup(fld[0])   : NULL;
+        p.uri           = fld[1][0] ? strdup(fld[1])   : NULL;
+        /* rest freed with g_free() */
+        p.bundle_path   = fld[2][0] ? g_strdup(fld[2]) : NULL;
+        p.template_file = fld[3][0] ? g_strdup(fld[3]) : NULL;
+        p.resources_dir = fld[4][0] ? g_strdup(fld[4]) : NULL;
+        p.stylesheet    = fld[5][0] ? g_strdup(fld[5]) : NULL;
+        g_strfreev(fld);
+        if (!p.uri) { free(p.name); continue; }
+        g_array_append_val(arr, p);
+    }
+    fclose(f);
+    /* Copy to a calloc block to match the allocator used in discover_plugins */
+    int n = (int)arr->len;
+    PluginInfo* list = n ? (PluginInfo*)calloc((size_t)n, sizeof(PluginInfo))
+                         : NULL;
+    if (list) memcpy(list, arr->data, (size_t)n * sizeof(PluginInfo));
+    g_array_free(arr, TRUE); /* frees GArray buffer; pointed-to strings survive */
+    *list_out = list;
+    *n_out    = list ? n : 0;
+    return TRUE;
+}
+
 /* ── Plugin discovery ────────────────────────────────────────────────────── */
 
 static void discover_plugins(ModguiHostUI* ui)
 {
     ui->n_plugins   = 0;
     ui->plugin_list = NULL;
+
+    /* Use the cache when possible to avoid a full LV2 scan on every open */
+    const char* cpath = plugin_cache_path();
+    if (plugin_cache_valid(cpath) &&
+        load_plugin_cache(cpath, &ui->plugin_list, &ui->n_plugins)) {
+        return;
+    }
 
     LilvNode* modgui_gui = lilv_new_uri(ui->world, MODGUI_GUI);
     const LilvPlugins* all = lilv_world_get_all_plugins(ui->world);
@@ -225,6 +345,9 @@ static void discover_plugins(ModguiHostUI* ui)
     lilv_node_free(style_node);
 
     ui->n_plugins = idx;
+
+    /* Persist the result so future opens skip the full scan */
+    save_plugin_cache(cpath, ui->plugin_list, ui->n_plugins);
 }
 
 static void free_plugin_info(PluginInfo* p)
@@ -315,9 +438,7 @@ on_script_message(WebKitUserContentManager* mgr,
                  * shrinking to the plugin's actual width. */
                 gtk_widget_set_size_request(ui->root, w, h + chrome);
 
-                /* Notify the host first — Carla's bridge handler runs
-                 * synchronously and calls gtk_window_resize internally,
-                 * but it may only adjust height (keeping its own width). */
+                /* Notify the host so it can update its bookkeeping. */
                 if (ui->resize) {
                     lv2_log_note(&ui->logger,
                                  "modgui-host: ui_resize(%d, %d)\n",
@@ -326,19 +447,22 @@ on_script_message(WebKitUserContentManager* mgr,
                                           w, h + chrome);
                 }
 
-                /* After ui_resize, force the exact window size directly.
-                 * This overrides any width the bridge may have kept from its
-                 * own gtk_window_resize call inside ui_resize.  Doing this
-                 * AFTER ui_resize ensures we win the race: both resize
-                 * requests are synchronous on the GTK main thread and the
-                 * window manager processes them in order. */
+                /* Force the GTK window to the exact content size.
+                 * gtk_window_resize alone is not reliable: Carla's bridge
+                 * may reset the width asynchronously via its own resize
+                 * response.  gtk_window_set_resizable(FALSE) sends WM-level
+                 * min=max=natural_size hints that no subsequent resize call
+                 * can override.  The natural size is determined by
+                 * set_size_request on the webview and root above. */
                 GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
                 lv2_log_note(&ui->logger,
-                             "modgui-host: gtk_window_resize(%d, %d) toplevel=%s\n",
+                             "modgui-host: set_resizable(FALSE) + resize(%d,%d) toplevel=%s\n",
                              w, h + chrome,
                              GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
-                if (GTK_IS_WINDOW(toplevel))
+                if (GTK_IS_WINDOW(toplevel)) {
+                    gtk_window_set_resizable(GTK_WINDOW(toplevel), FALSE);
                     gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
+                }
             }
         }
         if (w_v) g_object_unref(w_v);

@@ -438,6 +438,19 @@ on_script_message(WebKitUserContentManager* mgr,
                  * shrinking to the plugin's actual width. */
                 gtk_widget_set_size_request(ui->root, w, h + chrome);
 
+                /* Diagnostic via JS (visible in Carla log, unlike lv2_log_note) */
+                GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
+                {
+                    gchar* dbg = g_strdup_printf(
+                        "console.log('[modgui] C: toplevel=%s is_window=%s"
+                        " w=%d h_total=%d root_alloc=%dx%d web_alloc=%dx%d');",
+                        G_OBJECT_TYPE_NAME(toplevel),
+                        GTK_IS_WINDOW(toplevel) ? "true" : "false",
+                        w, h + chrome, root_h, root_h, web_h, web_h);
+                    run_js(ui, dbg);
+                    g_free(dbg);
+                }
+
                 /* Notify the host so it can update its bookkeeping. */
                 if (ui->resize) {
                     lv2_log_note(&ui->logger,
@@ -447,21 +460,35 @@ on_script_message(WebKitUserContentManager* mgr,
                                           w, h + chrome);
                 }
 
-                /* Force the GTK window to the exact content size.
-                 * gtk_window_resize alone is not reliable: Carla's bridge
-                 * may reset the width asynchronously via its own resize
-                 * response.  gtk_window_set_resizable(FALSE) sends WM-level
-                 * min=max=natural_size hints that no subsequent resize call
-                 * can override.  The natural size is determined by
-                 * set_size_request on the webview and root above. */
-                GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
-                lv2_log_note(&ui->logger,
-                             "modgui-host: set_resizable(FALSE) + resize(%d,%d) toplevel=%s\n",
-                             w, h + chrome,
-                             GTK_IS_WINDOW(toplevel) ? "GtkWindow" : "other");
+                /* Enforce exact content width via WM geometry hints.
+                 * gtk_window_set_resizable(FALSE) depends on GTK computing
+                 * the correct natural size, which may be wrong if WebKit
+                 * reports its current allocation (400px) as its preferred
+                 * size.  gtk_window_set_geometry_hints with max_width=w is
+                 * a direct WM-level constraint that no subsequent resize can
+                 * exceed, regardless of GTK's natural-size computation. */
                 if (GTK_IS_WINDOW(toplevel)) {
-                    gtk_window_set_resizable(GTK_WINDOW(toplevel), FALSE);
+                    GdkGeometry geom = {0};
+                    geom.min_width  = w;
+                    geom.max_width  = w;
+                    geom.min_height = h + chrome;
+                    geom.max_height = 32767;
+                    gtk_window_set_geometry_hints(GTK_WINDOW(toplevel),
+                                                  NULL, &geom,
+                                                  GDK_HINT_MIN_SIZE |
+                                                  GDK_HINT_MAX_SIZE);
                     gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
+                }
+
+                /* Post-resize diagnostic: log viewport 600ms later */
+                {
+                    gchar* chk = g_strdup_printf(
+                        "setTimeout(function(){"
+                        "console.log('[modgui] post-resize: viewport='"
+                        "+window.innerWidth+'x'+window.innerHeight);"
+                        "},600);");
+                    run_js(ui, chk);
+                    g_free(chk);
                 }
             }
         }

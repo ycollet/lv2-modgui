@@ -379,6 +379,25 @@ static gboolean run_js(ModguiHostUI* ui, const char* script)
     return TRUE;
 }
 
+/* ── Delayed geometry-hint re-apply ─────────────────────────────────────── */
+
+typedef struct { GtkWindow* win; gint w; gint h_total; } DelayedHint;
+
+static gboolean apply_width_hint(gpointer ud)
+{
+    DelayedHint* d = (DelayedHint*)ud;
+    GdkGeometry geom = {0};
+    geom.min_width  = d->w;
+    geom.max_width  = d->w;
+    geom.min_height = d->h_total;
+    geom.max_height = 32767;
+    gtk_window_set_geometry_hints(d->win, NULL, &geom,
+                                  GDK_HINT_MIN_SIZE | GDK_HINT_MAX_SIZE);
+    gtk_window_resize(d->win, d->w, d->h_total);
+    g_free(d);
+    return G_SOURCE_REMOVE;
+}
+
 /* ── Script message handler (JS → C) ────────────────────────────────────── */
 
 static void
@@ -441,12 +460,13 @@ on_script_message(WebKitUserContentManager* mgr,
                 /* Diagnostic via JS (visible in Carla log, unlike lv2_log_note) */
                 GtkWidget* toplevel = gtk_widget_get_toplevel(ui->root);
                 {
+                    gint win_w = gtk_widget_get_allocated_width(toplevel);
                     gchar* dbg = g_strdup_printf(
                         "console.log('[modgui] C: toplevel=%s is_window=%s"
-                        " w=%d h_total=%d root_alloc=%dx%d web_alloc=%dx%d');",
+                        " w=%d h_total=%d chrome=%d win_w=%d');",
                         G_OBJECT_TYPE_NAME(toplevel),
                         GTK_IS_WINDOW(toplevel) ? "true" : "false",
-                        w, h + chrome, root_h, root_h, web_h, web_h);
+                        w, h + chrome, chrome, win_w);
                     run_js(ui, dbg);
                     g_free(dbg);
                 }
@@ -461,12 +481,10 @@ on_script_message(WebKitUserContentManager* mgr,
                 }
 
                 /* Enforce exact content width via WM geometry hints.
-                 * gtk_window_set_resizable(FALSE) depends on GTK computing
-                 * the correct natural size, which may be wrong if WebKit
-                 * reports its current allocation (400px) as its preferred
-                 * size.  gtk_window_set_geometry_hints with max_width=w is
-                 * a direct WM-level constraint that no subsequent resize can
-                 * exceed, regardless of GTK's natural-size computation. */
+                 * Carla's bridge async round-trip (ui_resize → Carla → bridge
+                 * → gtk_window_resize) may override our width within ~200ms.
+                 * We apply hints immediately, then re-apply at 300ms after the
+                 * override has settled. */
                 if (GTK_IS_WINDOW(toplevel)) {
                     GdkGeometry geom = {0};
                     geom.min_width  = w;
@@ -478,15 +496,24 @@ on_script_message(WebKitUserContentManager* mgr,
                                                   GDK_HINT_MIN_SIZE |
                                                   GDK_HINT_MAX_SIZE);
                     gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
+
+                    /* Re-apply 300ms later to win against Carla's async
+                     * bridge response that may reset the width. */
+                    DelayedHint* d = g_new(DelayedHint, 1);
+                    d->win    = GTK_WINDOW(toplevel);
+                    d->w      = w;
+                    d->h_total = h + chrome;
+                    g_timeout_add(300, apply_width_hint, d);
                 }
 
-                /* Post-resize diagnostic: log viewport 600ms later */
+                /* Post-resize diagnostic: log viewport 900ms later
+                 * (after the 300ms delayed re-apply + WM round-trip). */
                 {
                     gchar* chk = g_strdup_printf(
                         "setTimeout(function(){"
                         "console.log('[modgui] post-resize: viewport='"
                         "+window.innerWidth+'x'+window.innerHeight);"
-                        "},600);");
+                        "},900);");
                     run_js(ui, chk);
                     g_free(chk);
                 }
@@ -1212,7 +1239,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     /* Do NOT call gtk_init here — the host (Carla) already owns GTK init. */
 
     ui->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(ui->root, 400, 200);
+    gtk_widget_set_size_request(ui->root, 100, 100);
 
     /* Header bar */
     ui->header_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

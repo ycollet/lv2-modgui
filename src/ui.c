@@ -926,6 +926,22 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     lv2_log_note(&ui->logger,
                  "modgui-host: loading template %s\n", p->template_file);
 
+    /* Clear size constraints left by any previously loaded plugin.
+     * Without this, geometry hints from the old plugin (e.g. max_width=700)
+     * prevent the new plugin from sizing correctly at load time — the user
+     * would have to reopen the window to get the right size. */
+    gtk_widget_set_hexpand(ui->webview, TRUE);
+    gtk_widget_set_vexpand(ui->webview, TRUE);
+    gtk_widget_set_size_request(ui->webview, -1, -1);
+    gtk_widget_set_size_request(ui->root,    280, 160);
+    {
+        GtkWidget* tl = gtk_widget_get_toplevel(ui->root);
+        if (GTK_IS_WINDOW(tl)) {
+            gtk_window_set_geometry_hints(GTK_WINDOW(tl), NULL, NULL, 0);
+            gtk_window_resize(GTK_WINDOW(tl), 280, 160);
+        }
+    }
+
     /* Read template HTML */
     gchar*  html     = NULL;
     gsize   html_len = 0;

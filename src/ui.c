@@ -1239,7 +1239,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
     /* Do NOT call gtk_init here — the host (Carla) already owns GTK init. */
 
     ui->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(ui->root, 100, 100);
+    gtk_widget_set_size_request(ui->root, 280, 160);
 
     /* Header bar */
     ui->header_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);

@@ -91,6 +91,12 @@ typedef struct {
 
     /* Host resize API (optional — may be NULL) */
     LV2UI_Resize*       resize;
+
+    /* Width-lock: configure-event correction loop */
+    gint   target_w;      /* 0 = inactive */
+    gint   target_h;
+    gint   corrections;   /* how many times we've already corrected */
+    gulong size_handler;  /* configure-event signal connection ID */
 } ModguiHostUI;
 
 /* ── Forward declarations ────────────────────────────────────────────────── */
@@ -379,6 +385,29 @@ static gboolean run_js(ModguiHostUI* ui, const char* script)
     return TRUE;
 }
 
+/* ── Configure-event correction loop ────────────────────────────────────── */
+
+/* Fires every time the WM sends a ConfigureNotify (window moved/resized).
+ * If Carla's bridge overrides our width, we immediately re-apply. */
+static gboolean on_configure_event(GtkWidget* widget, GdkEventConfigure* ev,
+                                    gpointer user_data)
+{
+    ModguiHostUI* ui = (ModguiHostUI*)user_data;
+    if (ui->target_w <= 0 || ui->corrections >= 5) return FALSE;
+    if (ev->width == ui->target_w) return FALSE; /* already correct */
+
+    ui->corrections++;
+    GdkGeometry geom = {0};
+    geom.min_width  = ui->target_w;
+    geom.max_width  = ui->target_w;
+    geom.min_height = ui->target_h;
+    geom.max_height = 32767;
+    gtk_window_set_geometry_hints(GTK_WINDOW(widget), NULL, &geom,
+                                  GDK_HINT_MIN_SIZE | GDK_HINT_MAX_SIZE);
+    gtk_window_resize(GTK_WINDOW(widget), ui->target_w, ui->target_h);
+    return FALSE;
+}
+
 /* ── Delayed geometry-hint re-apply ─────────────────────────────────────── */
 
 typedef struct { GtkWindow* win; gint w; gint h_total; } DelayedHint;
@@ -481,11 +510,23 @@ on_script_message(WebKitUserContentManager* mgr,
                 }
 
                 /* Enforce exact content width via WM geometry hints.
-                 * Carla's bridge async round-trip (ui_resize → Carla → bridge
-                 * → gtk_window_resize) may override our width within ~200ms.
-                 * We apply hints immediately, then re-apply at 300ms after the
-                 * override has settled. */
+                 * Carla's bridge may override our width asynchronously.
+                 * Two layers of defence:
+                 *   1. Immediate: geometry hints + gtk_window_resize now.
+                 *   2. configure-event loop: corrects every subsequent
+                 *      WM-notified resize that doesn't match target_w.
+                 *   3. Delayed re-apply at 300ms as a final safety net. */
                 if (GTK_IS_WINDOW(toplevel)) {
+                    /* Arm the correction loop for the new target size */
+                    ui->target_w    = w;
+                    ui->target_h    = h + chrome;
+                    ui->corrections = 0;
+                    if (ui->size_handler == 0)
+                        ui->size_handler =
+                            g_signal_connect(toplevel, "configure-event",
+                                             G_CALLBACK(on_configure_event),
+                                             ui);
+
                     GdkGeometry geom = {0};
                     geom.min_width  = w;
                     geom.max_width  = w;
@@ -497,8 +538,7 @@ on_script_message(WebKitUserContentManager* mgr,
                                                   GDK_HINT_MAX_SIZE);
                     gtk_window_resize(GTK_WINDOW(toplevel), w, h + chrome);
 
-                    /* Re-apply 300ms later to win against Carla's async
-                     * bridge response that may reset the width. */
+                    /* 300ms delayed re-apply as final safety net */
                     DelayedHint* d = g_new(DelayedHint, 1);
                     d->win    = GTK_WINDOW(toplevel);
                     d->w      = w;
@@ -928,8 +968,8 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
 
     /* Clear size constraints left by any previously loaded plugin.
      * Without this, geometry hints from the old plugin (e.g. max_width=700)
-     * prevent the new plugin from sizing correctly at load time — the user
-     * would have to reopen the window to get the right size. */
+     * prevent the new plugin from sizing correctly at load time. */
+    ui->target_w = 0;  /* disable configure-event corrections for old plugin */
     gtk_widget_set_hexpand(ui->webview, TRUE);
     gtk_widget_set_vexpand(ui->webview, TRUE);
     gtk_widget_set_size_request(ui->webview, -1, -1);
@@ -1351,6 +1391,13 @@ static void
 cleanup(LV2UI_Handle handle)
 {
     ModguiHostUI* ui = (ModguiHostUI*)handle;
+    /* Disconnect configure-event handler before the host destroys the window */
+    if (ui->size_handler) {
+        GtkWidget* tl = gtk_widget_get_toplevel(ui->root);
+        if (GTK_IS_WINDOW(tl))
+            g_signal_handler_disconnect(tl, ui->size_handler);
+        ui->size_handler = 0;
+    }
     /* ui->root is owned by the host after we returned it as LV2UI_Widget;
        the host destroys it — calling gtk_widget_destroy here double-frees. */
     for (int i = 0; i < ui->n_plugins; i++)

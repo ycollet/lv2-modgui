@@ -393,10 +393,16 @@ static gboolean on_configure_event(GtkWidget* widget, GdkEventConfigure* ev,
                                     gpointer user_data)
 {
     ModguiHostUI* ui = (ModguiHostUI*)user_data;
-    if (ui->target_w <= 0 || ui->corrections >= 5) return FALSE;
+    lv2_log_note(&ui->logger,
+                 "modgui-host: configure-event w=%d target=%d corrections=%d\n",
+                 ev->width, ui->target_w, ui->corrections);
+    if (ui->target_w <= 0 || ui->corrections >= 10) return FALSE;
     if (ev->width == ui->target_w) return FALSE; /* already correct */
 
     ui->corrections++;
+    lv2_log_note(&ui->logger,
+                 "modgui-host: applying correction %d: resize to %d\n",
+                 ui->corrections, ui->target_w);
     GdkGeometry geom = {0};
     geom.min_width  = ui->target_w;
     geom.max_width  = ui->target_w;
@@ -973,7 +979,11 @@ static void load_modgui(ModguiHostUI* ui, const PluginInfo* p)
     gtk_widget_set_hexpand(ui->webview, TRUE);
     gtk_widget_set_vexpand(ui->webview, TRUE);
     gtk_widget_set_size_request(ui->webview, -1, -1);
-    gtk_widget_set_size_request(ui->root,    280, 160);
+    /* Reset to 1×1 (no GTK floor) so the new plugin's contentReady can
+     * shrink the window below the previous plugin's width.  A 280×160 floor
+     * here would prevent the WM / GTK from allocating less than 280px even
+     * when geometry_hints(max_width < 280) is set. */
+    gtk_widget_set_size_request(ui->root,    1, 1);
     {
         GtkWidget* tl = gtk_widget_get_toplevel(ui->root);
         if (GTK_IS_WINDOW(tl)) {

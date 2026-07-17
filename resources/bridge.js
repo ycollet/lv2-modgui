@@ -27,11 +27,22 @@
     }
 
     function render(tpl, ctx) {
-      /* {{#block}}...{{/block}} — iterate array or enter object if truthy */
+      /* {{#each key}}...{{/each}} — standard Handlebars iteration */
       tpl = tpl.replace(
-        /\{\{#([\w./]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g,
+        /\{\{#\s*each\s+([\w./]+)\s*\}\}([\s\S]*?)\{\{\/\s*each\s*\}\}/g,
         function (_, key, inner) {
-          var val = get(ctx, key);
+          var val = get(ctx, key.trim());
+          if (!val || !Array.isArray(val)) return '';
+          return val.map(function (item) { return render(inner, item); }).join('');
+        }
+      );
+
+      /* {{#block}}...{{/block}} — iterate array or enter object if truthy.
+         Allow optional whitespace around the key name. */
+      tpl = tpl.replace(
+        /\{\{#\s*([\w./]+)\s*\}\}([\s\S]*?)\{\{\/\s*\1\s*\}\}/g,
+        function (_, key, inner) {
+          var val = get(ctx, key.trim());
           if (!val) return '';
           if (Array.isArray(val))
             return val.map(function (item) { return render(inner, item); }).join('');
@@ -41,9 +52,9 @@
 
       /* {{^block}}...{{/block}} — render if falsy / empty array */
       tpl = tpl.replace(
-        /\{\{\^([\w./]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g,
+        /\{\{\^\s*([\w./]+)\s*\}\}([\s\S]*?)\{\{\/\s*\1\s*\}\}/g,
         function (_, key, inner) {
-          var val = get(ctx, key);
+          var val = get(ctx, key.trim());
           if (val && (!Array.isArray(val) || val.length)) return '';
           return render(inner, ctx);
         }
@@ -52,17 +63,17 @@
       /* {{! comment }} — strip */
       tpl = tpl.replace(/\{\{![\s\S]*?\}\}/g, '');
 
-      /* {{{triple}}} — unescaped output */
-      tpl = tpl.replace(/\{\{\{([\w./]+)\}\}\}/g, function (_, key) {
-        var val = get(ctx, key);
+      /* {{{triple}}} — unescaped output (allow whitespace) */
+      tpl = tpl.replace(/\{\{\{\s*([\w./]+)\s*\}\}\}/g, function (_, key) {
+        var val = get(ctx, key.trim());
         return val != null ? String(val) : '';
       });
 
-      /* {{variable}} — HTML-escaped output */
+      /* {{variable}} — HTML-escaped output (allow whitespace around name) */
       tpl = tpl.replace(
-        /\{\{([^#^/!{][\w./]*)\}\}/g,
+        /\{\{\s*([^#^/!{}\s][\w./]*)\s*\}\}/g,
         function (_, key) {
-          var val = get(ctx, key);
+          var val = get(ctx, key.trim());
           if (val == null) return '';
           return String(val)
             .replace(/&/g, '&amp;')
@@ -126,11 +137,11 @@
       window.widget.parameterChanged(symbol, value);
   };
 
-  /* ── MOD compatibility: window.control API ───────────────────────────── */
+  /* ── MOD compatibility: window.control / window.host APIs ─────────────── */
 
   /* Some plugin GUIs call window.control.setPortValue() to send parameter
      changes. Provide a minimal shim so those button handlers work. */
-  window.control = {
+  var controlAPI = {
     setPortValue: function (symbol, value) {
       var port = portInfo[symbol] || { min: 0, max: 1, def: 0, integer: false };
       var norm = port.max !== port.min
@@ -145,6 +156,10 @@
       return port ? parseFloat(port.value) : 0;
     },
   };
+
+  window.control = controlAPI;
+  /* Some modguis use window.host instead of window.control */
+  window.host = controlAPI;
 
   /* ── JS → C ──────────────────────────────────────────────────────────── */
 
@@ -259,9 +274,9 @@
         var dragging = false;
 
         /* Binary toggle: integer port with exactly a 1-unit range (e.g. on/off) */
-        var isButton = port.integer && (port.max - port.min) === 1;
+        var isInteger = port.integer && port.max > port.min;
 
-        el.style.cursor = 'ns-resize';
+        el.style.cursor = isInteger ? 'pointer' : 'ns-resize';
         el.title = symbol;
 
         el.addEventListener('mousedown', function (e) {
@@ -287,19 +302,21 @@
         });
 
         /* WebKit suppresses 'click' after e.preventDefault() on mousedown.
-           For binary toggles: fire the toggle on mouseup if the drag didn't
+           For integer ports: fire a cycle step on mouseup if the drag didn't
            produce a value change (handles both clean taps and small drags that
-           round back to the starting value). */
+           round back to the starting value).
+           Binary (max-min=1): toggle between min and max.
+           Multi-state (max-min>1): step min→1→2→...→max→min. */
         document.addEventListener('mouseup', function () {
-          if (dragging && isButton) {
+          if (dragging && isInteger) {
             var cur      = parseFloat(el.dataset.value);
             var startVal = Math.round(port.min + startNorm * (port.max - port.min));
             if (cur === startVal) {
-              var toggled = startVal >= port.max ? port.min : port.max;
-              var tn      = port.max !== port.min
-                ? (toggled - port.min) / (port.max - port.min) : 0.0;
-              updateControlVisual(el, tn, toggled, port);
-              sendParameterChange(symbol, toggled);
+              var next = startVal >= port.max ? port.min : startVal + 1;
+              var tn   = port.max !== port.min
+                ? (next - port.min) / (port.max - port.min) : 0.0;
+              updateControlVisual(el, tn, next, port);
+              sendParameterChange(symbol, next);
             }
           }
           dragging = false;
@@ -401,18 +418,27 @@
 
   function renderTemplate() {
     var data = window.__MOD_DATA__;
-    if (!data) return;
+    if (!data) { console.warn('[modgui] renderTemplate: no __MOD_DATA__'); return; }
 
+    console.log('[modgui] renderTemplate: label=' + data.label +
+                ' effect.name=' + (data.effect && data.effect.name));
     var raw      = document.body.innerHTML;
     var rendered = MiniHandlebars.compile(raw)(data);
+    console.log('[modgui] renderTemplate: done, changed=' + (raw !== rendered));
     document.body.innerHTML = rendered;
   }
 
   /* ── Bootstrap on DOM ready ────────────────────────────────────────────── */
 
   function bootstrap() {
+    console.log('[modgui] bootstrap: readyState=' + document.readyState +
+                ' __MOD_DATA__=' + (window.__MOD_DATA__ ? 'set' : 'missing'));
     buildPortInfoFromModData();
-    renderTemplate();   /* Handlebars → real HTML */
+    try {
+      renderTemplate();   /* Handlebars → real HTML */
+    } catch (e) {
+      console.error('[modgui] renderTemplate failed: ' + e);
+    }
     createWidget();
     initControls();
 

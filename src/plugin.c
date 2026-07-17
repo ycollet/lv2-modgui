@@ -486,8 +486,10 @@ static bool load_hosted_plugin(ModguiHost* plugin, const char* uri,
     out->lp      = lp;
     out->n_ports = n_ports;
 
-    /* Instantiate */
-    out->instance = lilv_plugin_instantiate(lp, plugin->sample_rate, NULL);
+    /* Instantiate — pass urid:Map so plugins that require it can start */
+    const LV2_Feature map_feature  = { LV2_URID__map, plugin->map };
+    const LV2_Feature* features[]  = { &map_feature, NULL };
+    out->instance = lilv_plugin_instantiate(lp, plugin->sample_rate, features);
     if (!out->instance) {
         lv2_log_error(&plugin->logger,
                       "modgui-host: failed to instantiate %s\n", uri);
@@ -564,15 +566,13 @@ work(LV2_Handle                  instance,
     ModguiHost* plugin = (ModguiHost*)instance;
     const char* uri    = (const char*)data;
 
-    HostedData* hd = (HostedData*)malloc(sizeof(HostedData));
+    HostedData* hd = (HostedData*)calloc(1, sizeof(HostedData));
     if (!hd) return LV2_WORKER_ERR_NO_SPACE;
 
-    if (!load_hosted_plugin(plugin, uri, hd)) {
-        free(hd);
-        hd = NULL;
-    } else {
-        hd->uri = strdup(uri);
-    }
+    /* On failure, load_hosted_plugin calls free_hosted_data(hd) internally,
+     * which zeroes all fields — safe to set uri afterwards. */
+    load_hosted_plugin(plugin, uri, hd);
+    hd->uri = strdup(uri);  /* always save URI so reopen can restore it */
 
     return respond(respond_handle, sizeof(HostedData*), &hd);
 }
@@ -584,29 +584,28 @@ work_response(LV2_Handle instance, uint32_t size, const void* data)
     ModguiHost* plugin  = (ModguiHost*)instance;
     HostedData* new_hd  = *(HostedData**)data;
 
-    if (!new_hd) return LV2_WORKER_SUCCESS; /* load failed */
+    if (!new_hd) return LV2_WORKER_SUCCESS; /* calloc failed in work() */
 
-    /* Free old hosted plugin */
+    /* Always transfer URI so patch:Get can restore it on next UI open,
+     * even when the plugin failed to instantiate (e.g. missing features). */
+    free(plugin->hosted_plugin_uri);
+    plugin->hosted_plugin_uri = new_hd->uri;
+    new_hd->uri               = NULL;
+    plugin->send_uri_to_ui    = true;
+
+    if (!new_hd->instance) {
+        /* Instantiation failed — URI is saved, old plugin keeps running */
+        free(new_hd);
+        return LV2_WORKER_SUCCESS;
+    }
+
+    /* Success: swap in the new plugin */
     HostedData old = plugin->hosted;
     plugin->hosted = *new_hd;
     free(new_hd);
 
-    /* Connect all ports (non-audio) — done once here, not in run() */
     connect_hosted_ports(plugin, &plugin->hosted);
-
-    /* Update stored URI (URI ownership transferred from HostedData) */
-    free(plugin->hosted_plugin_uri);
-    plugin->hosted_plugin_uri = plugin->hosted.uri;
-    plugin->hosted.uri        = NULL;
-
-    /* Activate */
     lilv_instance_activate(plugin->hosted.instance);
-
-    /* Tell run() to push the URI to the UI on the next cycle */
-    plugin->send_uri_to_ui = true;
-
-    /* Free old data — safe here since we're in work_response (audio thread),
-     * old instance is already detached */
     free_hosted_data(&old);
 
     return LV2_WORKER_SUCCESS;

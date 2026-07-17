@@ -114,6 +114,9 @@ static void     send_param_change(ModguiHostUI* ui,
 static void     on_script_message(WebKitUserContentManager* mgr,
                                    WebKitJavascriptResult* result,
                                    gpointer user_data);
+static gboolean on_run_file_chooser(WebKitWebView*            webview,
+                                     WebKitFileChooserRequest* request,
+                                     gpointer                  user_data);
 static gboolean run_js(ModguiHostUI* ui, const char* script);
 
 /* ── Plugin list cache ───────────────────────────────────────────────────── */
@@ -576,6 +579,46 @@ cleanup:
     if (value_v)  g_object_unref(value_v);
 }
 
+/* ── File chooser (run-file-chooser signal) ──────────────────────────────── */
+
+static gboolean
+on_run_file_chooser(WebKitWebView*            webview,
+                    WebKitFileChooserRequest* request,
+                    gpointer                  user_data)
+{
+    (void)webview;
+    (void)user_data;
+
+    GtkWidget* dialog = gtk_file_chooser_dialog_new(
+        "Select file", NULL,
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Open",   GTK_RESPONSE_ACCEPT,
+        NULL);
+
+    /* Apply MIME-type filters from the request if present */
+    const gchar* const* mime_types =
+        webkit_file_chooser_request_get_mime_types(request);
+    if (mime_types && mime_types[0]) {
+        GtkFileFilter* filter = gtk_file_filter_new();
+        for (int i = 0; mime_types[i]; i++)
+            gtk_file_filter_add_mime_type(filter, mime_types[i]);
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+    }
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        gchar* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        const gchar* files[] = { filename, NULL };
+        webkit_file_chooser_request_select_files(request, files);
+        g_free(filename);
+    } else {
+        webkit_file_chooser_request_cancel(request);
+    }
+
+    gtk_widget_destroy(dialog);
+    return TRUE;
+}
+
 /* ── Atom helpers ────────────────────────────────────────────────────────── */
 
 /* Ask the DSP for its current state (hosted plugin URI).
@@ -773,12 +816,19 @@ static gchar* build_plugin_json(LilvWorld* world,
             lilv_node_free(mx);
 
             if (!first[fi]) g_string_append_c(arr, ',');
+            /* Use g_ascii_formatd so floats always use '.' regardless of locale */
+            char s_min[G_ASCII_DTOSTR_BUF_SIZE];
+            char s_max[G_ASCII_DTOSTR_BUF_SIZE];
+            char s_def[G_ASCII_DTOSTR_BUF_SIZE];
+            g_ascii_formatd(s_min, sizeof(s_min), "%.6g", (double)min_v);
+            g_ascii_formatd(s_max, sizeof(s_max), "%.6g", (double)max_v);
+            g_ascii_formatd(s_def, sizeof(s_def), "%.6g", (double)def_v);
             g_string_append_printf(arr,
                 "{\"index\":%u,\"symbol\":%s,\"name\":%s,"
-                "\"minimum\":%.6g,\"maximum\":%.6g,\"default\":%.6g,"
-                "\"value\":%.6g,\"integer\":%s}",
+                "\"minimum\":%s,\"maximum\":%s,\"default\":%s,"
+                "\"value\":%s,\"integer\":%s}",
                 i, jsym, jname,
-                (double)min_v, (double)max_v, (double)def_v, (double)def_v,
+                s_min, s_max, s_def, s_def,
                 is_int_port ? "true" : "false");
         }
 
@@ -1344,6 +1394,7 @@ instantiate(const LV2UI_Descriptor*   descriptor,
         wk_settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
     webkit_settings_set_enable_write_console_messages_to_stdout(
         wk_settings, TRUE);
+    webkit_settings_set_enable_developer_extras(wk_settings, TRUE);
 
     WebKitUserContentManager* mgr = webkit_user_content_manager_new();
     webkit_user_content_manager_register_script_message_handler(mgr, "lv2");
@@ -1370,6 +1421,8 @@ instantiate(const LV2UI_Descriptor*   descriptor,
         GDK_KEY_PRESS_MASK      | GDK_FOCUS_CHANGE_MASK);
     g_signal_connect(ui->webview, "load-changed",
                      G_CALLBACK(on_page_load_changed), ui);
+    g_signal_connect(ui->webview, "run-file-chooser",
+                     G_CALLBACK(on_run_file_chooser), ui);
 
     /* Load placeholder page */
     webkit_web_view_load_html(
@@ -1483,11 +1536,13 @@ port_event(LV2UI_Handle  handle,
             const char* symbol = (const char*)LV2_ATOM_BODY_CONST(sym);
             float       value  = fval->body;
 
+            char s_val[G_ASCII_DTOSTR_BUF_SIZE];
+            g_ascii_formatd(s_val, sizeof(s_val), "%.6g", (double)value);
             char script[512];
             snprintf(script, sizeof(script),
                      "if(window.lv2SetParameter)"
-                     " window.lv2SetParameter('%s', %f);",
-                     symbol, (double)value);
+                     " window.lv2SetParameter('%s', %s);",
+                     symbol, s_val);
             run_js(ui, script);
         }
         return;

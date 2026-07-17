@@ -369,6 +369,8 @@
       el.classList.add('mod-active');
       el.addEventListener('click', function () {
         var active = el.classList.toggle('mod-active');
+        /* NAM and similar plugins use .on on the footswitch itself for bypassed state */
+        el.classList.toggle('on', !active);
         sendParameterChange(':bypass', active ? 0.0 : 1.0);
         document.querySelectorAll('[mod-role="bypass-light"]').forEach(function (light) {
           light.classList.toggle('on',  active);
@@ -376,6 +378,27 @@
         });
       });
     });
+
+    /* Path-parameter picker (e.g. NAM model file).
+       Sends parameterFilePick to C, which opens a GTK dialog and calls back
+       window.lv2PatchFileSelected(uri, path) when the user picks a file. */
+    document.querySelectorAll('[mod-role="input-parameter"][mod-widget="custom-select-path"]')
+      .forEach(function (el) {
+        var uri = el.getAttribute('mod-parameter-uri');
+        if (!uri) return;
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (window.webkit &&
+              window.webkit.messageHandlers &&
+              window.webkit.messageHandlers.lv2) {
+            window.webkit.messageHandlers.lv2.postMessage({
+              type: 'parameterFilePick',
+              uri: uri,
+            });
+          }
+        });
+      });
 
     /* Bare range inputs with mod-port-symbol */
     document.querySelectorAll('input[type="range"][mod-port-symbol]')
@@ -427,6 +450,20 @@
     console.log('[modgui] renderTemplate: done, changed=' + (raw !== rendered));
     document.body.innerHTML = rendered;
   }
+
+  /* ── C → JS: patch file selected ────────────────────────────────────────── */
+
+  /* Called from C after a GTK file dialog completes for a path parameter.
+     Updates the displayed filename in the picker widget. */
+  window.lv2PatchFileSelected = function (uri, filePath) {
+    if (!filePath) return;
+    var basename = filePath.split('/').pop();
+    document.querySelectorAll(
+      '[mod-role="input-parameter-value"][mod-parameter-uri="' + uri + '"]'
+    ).forEach(function (el) {
+      el.textContent = basename;
+    });
+  };
 
   /* ── Bootstrap on DOM ready ────────────────────────────────────────────── */
 

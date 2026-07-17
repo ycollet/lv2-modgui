@@ -111,6 +111,9 @@ static void     load_modgui(ModguiHostUI* ui, const PluginInfo* p);
 static void     send_hosted_uri(ModguiHostUI* ui, const char* uri);
 static void     send_param_change(ModguiHostUI* ui,
                                    const char* symbol, float value);
+static void     send_patch_set_path(ModguiHostUI* ui,
+                                     const char* prop_uri,
+                                     const char* path_str);
 static void     on_script_message(WebKitUserContentManager* mgr,
                                    WebKitJavascriptResult* result,
                                    gpointer user_data);
@@ -570,6 +573,48 @@ on_script_message(WebKitUserContentManager* mgr,
         }
         if (w_v) g_object_unref(w_v);
         if (h_v) g_object_unref(h_v);
+    } else if (type_str && strcmp(type_str, "parameterFilePick") == 0) {
+        /* JS requests a native file dialog for a patch:writable path parameter */
+        JSCValue* uri_v = jsc_value_object_get_property(val, "uri");
+        if (uri_v && jsc_value_is_string(uri_v)) {
+            char* prop_uri = jsc_value_to_string(uri_v);
+            lv2_log_note(&ui->logger,
+                         "modgui-host: parameterFilePick uri=%s\n", prop_uri);
+
+            GtkWidget* dialog = gtk_file_chooser_dialog_new(
+                "Select Model File", NULL,
+                GTK_FILE_CHOOSER_ACTION_OPEN,
+                "_Cancel", GTK_RESPONSE_CANCEL,
+                "_Open",   GTK_RESPONSE_ACCEPT,
+                NULL);
+
+            if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+                gchar* filepath =
+                    gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+                if (filepath) {
+                    lv2_log_note(&ui->logger,
+                                 "modgui-host: file selected: %s\n", filepath);
+                    /* Update the picker display in JS */
+                    gchar* juri  = json_escape_string(prop_uri);
+                    gchar* jpath = json_escape_string(filepath);
+                    gchar* script = g_strdup_printf(
+                        "if(window.lv2PatchFileSelected)"
+                        " window.lv2PatchFileSelected(%s,%s);",
+                        juri, jpath);
+                    run_js(ui, script);
+                    g_free(script);
+                    g_free(juri);
+                    g_free(jpath);
+
+                    /* Forward the path to the hosted plugin via patch:Set */
+                    send_patch_set_path(ui, prop_uri, filepath);
+                    g_free(filepath);
+                }
+            }
+            gtk_widget_destroy(dialog);
+            g_free(prop_uri);
+        }
+        if (uri_v) g_object_unref(uri_v);
     }
     g_free(type_str);
 
@@ -667,6 +712,29 @@ static void send_param_change(ModguiHostUI* ui,
     lv2_atom_forge_string(&ui->forge, symbol, strlen(symbol));
     lv2_atom_forge_key(&ui->forge, ui->urid.param_value);
     lv2_atom_forge_float(&ui->forge, value);
+    lv2_atom_forge_pop(&ui->forge, &frame);
+
+    LV2_Atom* atom = (LV2_Atom*)ui->forge_buf;
+    ui->write_function(ui->controller, PORT_EVENTS_IN,
+                       lv2_atom_total_size(atom),
+                       ui->urid.atom_event_transfer,
+                       atom);
+}
+
+/* Send a patch:Set atom with an atom:Path value (e.g. model file for NAM). */
+static void send_patch_set_path(ModguiHostUI* ui,
+                                 const char* prop_uri,
+                                 const char* path_str)
+{
+    LV2_URID prop_urid = ui->map->map(ui->map->handle, prop_uri);
+
+    lv2_atom_forge_set_buffer(&ui->forge, ui->forge_buf, sizeof(ui->forge_buf));
+    LV2_Atom_Forge_Frame frame;
+    lv2_atom_forge_object(&ui->forge, &frame, 0, ui->urid.patch_Set);
+    lv2_atom_forge_key(&ui->forge, ui->urid.patch_property);
+    lv2_atom_forge_urid(&ui->forge, prop_urid);
+    lv2_atom_forge_key(&ui->forge, ui->urid.patch_value);
+    lv2_atom_forge_path(&ui->forge, path_str, (uint32_t)strlen(path_str));
     lv2_atom_forge_pop(&ui->forge, &frame);
 
     LV2_Atom* atom = (LV2_Atom*)ui->forge_buf;
@@ -915,6 +983,44 @@ static gchar* build_plugin_json(LilvWorld* world,
     g_array_free(ctrl_arr, TRUE);
     g_string_append_c(controls, ']');
 
+    /* effect.parameters: patch:writable properties with atom:Path range.
+       Used by plugins like NAM that expose a file path as a patchable property. */
+    LilvNode* patch_writable_n = lilv_new_uri(world, LV2_PATCH__writable);
+    LilvNode* rdfs_range_n     = lilv_new_uri(world,
+                                  "http://www.w3.org/2000/01/rdf-schema#range");
+    LilvNode* atom_path_n      = lilv_new_uri(world, LV2_ATOM__Path);
+    GString* params            = g_string_new("[");
+    bool first_param           = true;
+
+    LilvNodes* writables = lilv_plugin_get_value(lp, patch_writable_n);
+    if (writables) {
+        LILV_FOREACH(nodes, wi, writables) {
+            const LilvNode* prop = lilv_nodes_get(writables, wi);
+            if (!lilv_node_is_uri(prop)) continue;
+            const char* prop_uri_str = lilv_node_as_uri(prop);
+
+            LilvNode* range = lilv_world_get(world, prop, rdfs_range_n, NULL);
+            bool is_path = range && lilv_node_is_uri(range) &&
+                           strcmp(lilv_node_as_uri(range), LV2_ATOM__Path) == 0;
+            if (range) lilv_node_free(range);
+            if (!is_path) continue;
+
+            gchar* jprop = json_escape_string(prop_uri_str);
+            if (!first_param) g_string_append_c(params, ',');
+            /* Put "uri" inside "path" too so {{uri}} resolves in {{#path}} blocks */
+            g_string_append_printf(params,
+                "{\"uri\":%s,\"path\":{\"uri\":%s,\"files\":[]}}",
+                jprop, jprop);
+            first_param = false;
+            g_free(jprop);
+        }
+        lilv_nodes_free(writables);
+    }
+    g_string_append_c(params, ']');
+    lilv_node_free(patch_writable_n);
+    lilv_node_free(rdfs_range_n);
+    lilv_node_free(atom_path_n);
+
     gchar* juri    = json_escape_string(plugin_uri);
     gchar* jname   = json_escape_string(plugin_name);
     gchar* jbrand  = json_escape_string(mg_brand_val);
@@ -929,7 +1035,8 @@ static gchar* build_plugin_json(LilvWorld* world,
               "\"audio\":{\"input\":%s,\"output\":%s},"
               "\"midi\":{\"input\":%s,\"output\":%s},"
               "\"control\":{\"input\":%s,\"output\":%s}"
-            "}"
+            "},"
+            "\"parameters\":%s"
           "},"
           "\"brand\":%s,"
           "\"label\":%s,"
@@ -941,6 +1048,7 @@ static gchar* build_plugin_json(LilvWorld* world,
         audio_in->str, audio_out->str,
         midi_in->str,  midi_out->str,
         ctrl_in->str,  ctrl_out->str,
+        params->str,
         jbrand, jlabel, jcolor, jknob,
         controls->str);
 
@@ -949,6 +1057,7 @@ static gchar* build_plugin_json(LilvWorld* world,
     g_free(mg_brand_val); g_free(mg_label_val);
     g_free(mg_color_val); g_free(mg_knob_val);
     g_string_free(controls, TRUE);
+    g_string_free(params, TRUE);
     g_string_free(audio_in, TRUE); g_string_free(audio_out, TRUE);
     g_string_free(midi_in,  TRUE); g_string_free(midi_out,  TRUE);
     g_string_free(ctrl_in,  TRUE); g_string_free(ctrl_out,  TRUE);

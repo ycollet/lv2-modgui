@@ -42,6 +42,8 @@ typedef struct {
     float*             ctrl_buffers;  /* one float per ctrl port, owned */
     /* audio port indices in the hosted plugin (-1 = absent) */
     int ai_l, ai_r, ao_l, ao_r;
+    /* designated control atom input port (-1 if none) */
+    int ctrl_atom_in_port;
     char*              uri;           /* owned: the plugin URI that was loaded */
 } HostedData;
 
@@ -79,6 +81,10 @@ typedef struct {
 
     /* Atom forge for events_out */
     LV2_Atom_Forge forge;
+
+    /* Atom forge + buffer for forwarding atoms to the hosted plugin's control input */
+    LV2_Atom_Forge hosted_forge;
+    uint8_t        hosted_atom_buf[ATOM_BUF_SIZE * 4];
 
     /* Hosted plugin state (swapped atomically in work_response) */
     HostedData hosted;
@@ -124,6 +130,7 @@ instantiate(const LV2_Descriptor*     descriptor,
     plugin->sample_rate = rate;
     plugin->hosted.ai_l = plugin->hosted.ai_r = -1;
     plugin->hosted.ao_l = plugin->hosted.ao_r = -1;
+    plugin->hosted.ctrl_atom_in_port = -1;
 
     const char* missing = lv2_features_query(features,
         LV2_URID__map,       &plugin->map,      true,
@@ -164,6 +171,7 @@ instantiate(const LV2_Descriptor*     descriptor,
         map->map(map->handle, MODGUI_PARAM_VALUE);
 
     lv2_atom_forge_init(&plugin->forge, map);
+    lv2_atom_forge_init(&plugin->hosted_forge, map);
 
     plugin->world = lilv_world_new();
     lilv_world_load_all(plugin->world);
@@ -245,13 +253,22 @@ static void run(LV2_Handle instance, uint32_t n_samples)
     if (plugin->events_out)
         lv2_atom_forge_sequence_head(&plugin->forge, &seq_frame, 0);
 
+    /* Set up hosted atom input buffer as an empty sequence.
+       Atoms forwarded from events_in will be appended to this sequence
+       so the hosted plugin's designated control port receives them. */
+    LV2_Atom_Forge_Frame hfwd_frame;
+    lv2_atom_forge_set_buffer(&plugin->hosted_forge,
+                               plugin->hosted_atom_buf,
+                               sizeof(plugin->hosted_atom_buf));
+    lv2_atom_forge_sequence_head(&plugin->hosted_forge, &hfwd_frame, 0);
+
     /* Process incoming atoms */
     if (plugin->events_in) {
         LV2_ATOM_SEQUENCE_FOREACH(plugin->events_in, ev) {
             if (ev->body.type != plugin->urid.atom_Object) continue;
             const LV2_Atom_Object* obj = (const LV2_Atom_Object*)&ev->body;
 
-            /* patch:Set for hosted plugin URI */
+            /* patch:Set — URI loading handled here; all others forwarded to hosted plugin */
             if (obj->body.otype == plugin->urid.patch_Set) {
                 const LV2_Atom_URID* prop = NULL;
                 const LV2_Atom*      val  = NULL;
@@ -268,6 +285,13 @@ static void run(LV2_Handle instance, uint32_t n_samples)
                     plugin->schedule->schedule_work(
                         plugin->schedule->handle,
                         strlen(uri) + 1, uri);
+                } else if (prop && prop->body != plugin->urid.hosted_plugin_uri &&
+                           plugin->hosted.ctrl_atom_in_port >= 0) {
+                    /* Forward patch:Set for other properties (e.g. model file path)
+                       to the hosted plugin's designated control atom input port. */
+                    lv2_atom_forge_frame_time(&plugin->hosted_forge, ev->time.frames);
+                    lv2_atom_forge_write(&plugin->hosted_forge, &ev->body,
+                                         lv2_atom_total_size(&ev->body));
                 }
                 continue;
             }
@@ -299,8 +323,17 @@ static void run(LV2_Handle instance, uint32_t n_samples)
         }
     }
 
-    /* Reconnect audio ports each cycle (host may call connect_port any time) */
+    /* Close the hosted atom forwarding sequence */
+    lv2_atom_forge_pop(&plugin->hosted_forge, &hfwd_frame);
+
+    /* Reconnect audio and atom ports each cycle (host may call connect_port any time) */
     if (plugin->hosted.instance) {
+        /* Connect hosted plugin's designated atom input to our forwarding buffer */
+        if (plugin->hosted.ctrl_atom_in_port >= 0)
+            lilv_instance_connect_port(plugin->hosted.instance,
+                                       (uint32_t)plugin->hosted.ctrl_atom_in_port,
+                                       plugin->hosted_atom_buf);
+
         /* Copy our audio input to hosted plugin's audio inputs */
         if (plugin->hosted.ai_l >= 0 && plugin->audio_in_l)
             lilv_instance_connect_port(plugin->hosted.instance,
@@ -482,6 +515,37 @@ static bool load_hosted_plugin(ModguiHost* plugin, const char* uri,
     lilv_node_free(lv2_max);
     lilv_node_free(lv2_default);
 
+    /* Detect designated control atom input port (lv2:designation lv2:control).
+       This is the port we forward patch:Set atoms into (e.g. NAM model path). */
+    {
+        LilvNode* atom_class_n  = lilv_new_uri(plugin->world, LV2_ATOM__AtomPort);
+        LilvNode* input_class_n = lilv_new_uri(plugin->world, LV2_CORE__InputPort);
+        LilvNode* desig_pred    = lilv_new_uri(plugin->world, LV2_CORE__designation);
+        LilvNode* ctrl_desig    = lilv_new_uri(plugin->world, LV2_CORE__control);
+
+        out->ctrl_atom_in_port = -1;
+        for (uint32_t i = 0; i < n_ports; i++) {
+            const LilvPort* port = lilv_plugin_get_port_by_index(lp, i);
+            if (!lilv_port_is_a(lp, port, atom_class_n)) continue;
+            if (!lilv_port_is_a(lp, port, input_class_n)) continue;
+            LilvNode* des = lilv_port_get(lp, port, desig_pred);
+            bool is_ctrl  = des && lilv_node_is_uri(des) &&
+                            strcmp(lilv_node_as_uri(des), LV2_CORE__control) == 0;
+            if (des) lilv_node_free(des);
+            if (is_ctrl) {
+                out->ctrl_atom_in_port = (int)i;
+                break;
+            }
+            /* Fallback: use first atom input port if none is designated */
+            if (out->ctrl_atom_in_port < 0)
+                out->ctrl_atom_in_port = (int)i;
+        }
+        lilv_node_free(atom_class_n);
+        lilv_node_free(input_class_n);
+        lilv_node_free(desig_pred);
+        lilv_node_free(ctrl_desig);
+    }
+
     /* Store non-owning plugin reference for use in connect_hosted_ports */
     out->lp      = lp;
     out->n_ports = n_ports;
@@ -515,6 +579,7 @@ static void free_hosted_data(HostedData* d)
     free(d->uri);
     memset(d, 0, sizeof(*d));
     d->ai_l = d->ai_r = d->ao_l = d->ao_r = -1;
+    d->ctrl_atom_in_port = -1;
 }
 
 /*

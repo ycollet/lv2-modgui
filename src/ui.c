@@ -114,6 +114,7 @@ static void     send_param_change(ModguiHostUI* ui,
 static void     send_patch_set_path(ModguiHostUI* ui,
                                      const char* prop_uri,
                                      const char* path_str);
+static gchar*   json_escape_string(const char* s);
 static void     on_script_message(WebKitUserContentManager* mgr,
                                    WebKitJavascriptResult* result,
                                    gpointer user_data);
